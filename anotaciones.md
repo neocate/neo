@@ -1,5 +1,24 @@
 # Anotaciones
 
+- 2026-08-08: `monitor_niveles.py` - `_asegurar_historico()` disparaba una
+  descarga completa (`descargar()`, que REESCRIBE el CSV entero) por cada TF
+  que no llegara a `--desde-dias` de profundidad. Si se lanzaban DOS
+  `monitor_niveles.py` a la vez sobre la misma moneda (ej. uno en 15m y otro
+  en 1h, ambos asegurando el mismo set `TIMEFRAMES_NIVELES`), los dos podian
+  ver el fichero como "corto" al mismo tiempo y disparar la misma descarga
+  completa en paralelo - en el mejor caso, trabajo duplicado; en el peor,
+  dos procesos escribiendo el mismo `historico_<COIN>_<TF>_bitget.csv` a la
+  vez (dos `open(..., 'w')` solapados). Arreglado con `_con_lock_historico()`:
+  lock de fichero por creacion atomica (`O_CREAT|O_EXCL`) junto al historico
+  (`<ruta>.lock`) - el proceso que lo consigue baja de verdad; el que lo
+  pierde espera a que se libere y solo hace `actualizar()` (rapido, ya no
+  hace falta repetir la descarga completa). Probado con dos hilos
+  arrancando casi a la vez: solo uno descarga, el otro actualiza. Limitacion
+  conocida y aceptada: si un proceso muere a mitad con el lock puesto, queda
+  huerfano - no se limpia solo (habria que borrar el `.lock` a mano); no se
+  añadio deteccion de lock viejo por no complicar mas de lo que pide el caso
+  real.
+
 - 2026-08-07: Repo git reiniciado. El `.git` original tenia varios objetos
   sueltos corruptos a nivel de bytes (`inflate: data stream error` en el
   commit HEAD y al menos otros 4 objetos; `git status`/`git fsck --full`
