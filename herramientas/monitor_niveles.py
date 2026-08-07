@@ -151,6 +151,45 @@ def _primer_timestamp_ms(ruta):
     return int(primera[0]) if primera else None
 
 
+def _con_lock_historico(ruta, dias, coin, tf, espera=2.0, timeout=1800.0):
+    """Descarga completa (descargar()) de UN TF con un lock de fichero
+    (creacion atomica O_CREAT|O_EXCL) para que, si hay OTRO monitor_niveles.py
+    corriendo a la vez sobre la MISMA moneda/TF, no disparen los dos la misma
+    descarga completa en paralelo - descargar() abre el CSV en modo 'w' y lo
+    REESCRIBE entero, asi que dos procesos escribiendolo a la vez lo dejarian
+    con filas mezcladas/truncadas.
+
+    El que consigue el lock baja de verdad; el que lo pierde espera (polling,
+    'espera' segundos) a que el otro termine y borre el lock, y entonces solo
+    hace actualizar() - para cuando el primero acabo, el fichero ya tiene la
+    profundidad pedida, asi que un update (rapido) es suficiente, no hace
+    falta repetir la descarga completa. 'timeout' es una salvaguarda por si
+    el lock queda huerfano (proceso matado a mitad) - no se borra solo, pero
+    al menos no se espera para siempre."""
+    ruta_lock = ruta + ".lock"
+    try:
+        fd = os.open(ruta_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+    except FileExistsError:
+        esperado = 0.0
+        while os.path.exists(ruta_lock) and esperado < timeout:
+            time.sleep(espera)
+            esperado += espera
+        print(f"  {coin.upper()} {tf}: otro proceso ya estaba bajando el historico, "
+              f"actualizando en vez de repetir la descarga completa...")
+        _actualizar_bitget(coin, tf, desde=dias)
+        return
+
+    try:
+        print(f"  Bajando historico Bitget {coin.upper()} {tf} ({dias:.0f}d)...")
+        _descargar_bitget(coin, tf, desde=dias)
+    finally:
+        try:
+            os.remove(ruta_lock)
+        except OSError:
+            pass
+
+
 def _asegurar_historico(coin, tfs, dias):
     """Antes de que niveles_soporte.py pueda calcular nada, se necesita
     historico de Bitget con al menos 'dias' de profundidad para cada TF en
@@ -165,14 +204,16 @@ def _asegurar_historico(coin, tfs, dias):
     detectarlo (mirando el timestamp de la PRIMERA fila) y forzar una
     descarga completa con descargar(desde=dias) para tener los 'dias' de
     verdad. Si el fichero ya llega tan atras (o mas), solo se actualiza
-    (rapido, unas pocas velas nuevas)."""
+    (rapido, unas pocas velas nuevas). La descarga completa pasa por
+    _con_lock_historico (2026-08-08, a peticion de Fran: lanzar dos
+    monitor_niveles.py a la vez -p.ej. dos TF distintos de la misma moneda-
+    disparaba la misma descarga completa duplicada en los dos)."""
     corte_ms = int((datetime.now(timezone.utc) - timedelta(days=dias)).timestamp() * 1000)
     for tf in tfs:
         ruta = _archivo_bitget(coin, tf)
         primero = _primer_timestamp_ms(ruta) if os.path.exists(ruta) else None
         if primero is None or primero > corte_ms:
-            print(f"  Bajando historico Bitget {coin.upper()} {tf} ({dias:.0f}d)...")
-            _descargar_bitget(coin, tf, desde=dias)
+            _con_lock_historico(ruta, dias, coin, tf)
         else:
             _actualizar_bitget(coin, tf, desde=dias)
 
