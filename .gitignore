@@ -1,0 +1,29 @@
+# Claves y secretos (NUNCA subir)
+.env
+
+# Entornos virtuales de Python
+venv/
+.venv/
+
+# Cache de Python
+__pycache__/
+*.pyc
+
+# Datos capturados en vivo (libro/OI) y velas descargadas - se regeneran
+# corriendo herramientas/grabador_libro.py / descargar_bit.py, no se suben.
+herramientas/libro/
+historico_*.csv
+flujo_*.csv
+
+# Cache de historicos completos (Binance, 2017+) - GBs de datos, cada PC
+# los descarga/actualiza con herramientas/descargar_bin.py (nombre real:
+# <DD-MM-AA>_<COIN>_<TF>_binance.csv, sin prefijo "historico_" - por eso
+# necesita su propio patron, el de arriba no lo cubre).
+herramientas/historicos/
+
+# Logs de procesos lanzados en background (ej. nohup ... > libro.log &).
+*.log
+
+# Backup del .git corrupto anterior (ver anotaciones.md 2026-08-07) - no es
+# parte del repo, se queda en disco por si hace falta mirar algo despues.
+.git.corrupto-*/
