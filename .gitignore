@@ -15,6 +15,13 @@ herramientas/libro/
 historico_*.csv
 flujo_*.csv
 
+# Registro de operaciones de monitor.py y avisos de monitor_niveles.py -
+# se regeneran corriendo los scripts, un fichero por ejecucion (fecha en
+# el nombre), no se suben - ya se documentaba como "igual de gitignored"
+# en registro/csv_monitor.py pero faltaba el patron aqui.
+monitor_*.csv
+avisos_*.csv
+
 # Cache de historicos completos (Binance, 2017+) - GBs de datos, cada PC
 # los descarga/actualiza con herramientas/descargar_bin.py (nombre real:
 # <DD-MM-AA>_<COIN>_<TF>_binance.csv, sin prefijo "historico_" - por eso

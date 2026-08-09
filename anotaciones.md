@@ -140,3 +140,87 @@
   entrelazada - ventana corta (solo al arranque de `monitor_niveles.py`,
   una vez) y de bajo impacto (la siguiente `actualizar()` la vuelve a
   alinear), no se puso guardia extra por ahora.
+
+- 2026-08-10: `estrategia/filtros.py` - se eliminan `FiltroBTC`,
+  `FiltroSoporte` y `FiltroBollinger` (y se quita `_velas_btc`, solo lo
+  usaba el primero). No eran vetos reales, solo sombra - pero
+  `backtest_filtros_combinados.py` (9 años BTC+ETH) ya los habia medido
+  como veto y los tres empeoraban el resultado SIN EXCEPCION si se
+  promovian. Con esa pregunta ya contestada, seguir grabandolos como
+  sombra no aportaba nada nuevo, solo gasto (`FiltroBTC` pedia velas de
+  BTC aparte en cada intento de apertura). `FiltroCVD` se suma en su
+  lugar (sombra, sin backtest de escala todavia - un solo caso real medido
+  en conversacion, no alcanza el estandar que ya se exigio a RVOL/
+  volatilidad antes de promoverlos).
+
+- 2026-08-10: `FiltroOpenInterest`/`FiltroCVD` - primero se probo
+  leyendolos de `flujo_<fecha>_<monedas>.csv` (el CSV que graba
+  `herramientas/grabador_libro.py`, proceso APARTE de `monitor.py`), con
+  tail-read incremental y cache en memoria para no releer el fichero
+  entero cada vuelta (probado contra un CSV real de 22MB: primera lectura
+  900 filas, segunda 0.001s). Se REVIRTIO a peticion de Fran: la
+  continuidad de `grabador_libro.py` en produccion todavia no esta
+  decidida (ver `PENDIENTES.md`, la tarea programada de DSM sigue sin
+  armar) y `monitor.py` no debe depender de datos que hoy son solo de
+  prueba. Version final: se piden con la MISMA API que ya usa el resto de
+  `leer()` (`datos.open_interest`, `datos.trades` - igual patron que
+  `_funding_pct`), acumulando la serie en memoria de ESTE proceso. Mismo
+  trade-off que ya acepta el resto de `leer()` (un reinicio de
+  `monitor.py` vacia la serie) - sin depender de nada externo.
+
+- 2026-08-10: "estancamiento" (`PosicionSim.mfe_pct`/`mfe_dt`) deja de ser
+  solo registro y pasa a actuar: si una posicion lleva >=30 min sin
+  superar su propio maximo favorable, con la tendencia en contra, y el
+  precio sigue del lado bueno de la entrada, mueve el stop a breakeven
+  (mismo mecanismo y misma guarda que la reversion contraria - nunca
+  EMPEORA el stop). Motivo: con la salida RR fija (`exit_rr>0`, unica rama
+  activa desde el 2026-08-07) no hay NINGUN otro mecanismo que proteja una
+  posicion que dejo de avanzar - antes se quedaba expuesta al 100% del
+  riesgo inicial hasta objetivo o stop, sin importar cuanto tiempo llevara
+  sin progresar.
+
+- 2026-08-10: `monitor.py` pasa de 1 posicion de papel por moneda/rama a
+  hasta `cfg["posiciones_max"]` (default 3) CONCURRENTES -
+  `posiciones[coin]` de `PosicionSim|None` a lista. Se extrajo
+  `_gestionar_posicion()` (`posicion/posicion.py`) para gestionar cada una
+  sin duplicar la logica de stop/RR/escalera/trailing/estancamiento/
+  continuacion; el CSV pasa de una fila fija por vuelta a una fila por
+  posicion gestionada + una por el intento de apertura/orden pendiente.
+  Guarda anti-hedge añadida (no discutida en backtest, decision de
+  diseño): una señal en direccion OPUESTA a una posicion ya abierta no
+  apila un hedge sobre el mismo activo (las dos patas se anularian entre
+  si y solo sumarian comision) - no abre hasta que esa(s) se cierren por
+  su propio stop/objetivo/señal contraria. Verificado con datos simulados
+  (sin red real): acumula hasta 3, respeta el tope, cada una cierra
+  independiente por su propio stop, y la guarda bloquea/deja pasar segun
+  haya o no posiciones contrarias vivas (si el cierre por stop y la señal
+  opuesta caen en la MISMA vuelta, la guarda ya ve el libro vacio y deja
+  pasar - comportamiento correcto, no un bug).
+
+- 2026-08-10: `telegram_control.py` - el menu/comandos de ajuste se
+  recortan de los 31 de `monitor.PARAMS_AJUSTABLES` a los 13 de
+  `PARAMS_TELEGRAM` (los que de verdad deciden entrada/riesgo/veto/salida/
+  tamaño - a peticion de Fran: "de todos los valores, cuales son los mas
+  necesarios de ir tocando"). El resto sigue existiendo en `monitor.py`
+  (CLI, `comandos/*.json` a mano) pero ya no se ofrece ni se acepta desde
+  Telegram. Se agrega boton/comando **Reset**: devuelve los 13 a su valor
+  de ARRANQUE de una vez, derivados llamando a `monitor._parse_args()` (no
+  hardcodeados - no se desincronizan si cambia un default en `monitor.py`;
+  `exit_rr` es la excepcion, su default crudo es 0.0 pero `main()` lo
+  fuerza a 3.0 siempre, se replica esa correccion). Probarlo en rafaga (13
+  comandos seguidos) expuso una colision real: el nombre de
+  `comandos/*.json` usaba resolucion de milisegundo
+  (`time.time()*1000`) y perdia comandos que caian en el mismo
+  milisegundo (13 llamadas, 8 archivos) - arreglado con
+  `time.time_ns()` + contador de proceso.
+
+  El comando `resumen` cambia de semantica: antes era un log de
+  aperturas/cierres de HOY, ahora son las operaciones ABIERTAS y
+  PENDIENTES ahora mismo (lado, entrada, stop/objetivo o precio limite,
+  pnl), reconstruidas de la fila mas reciente de cada moneda (agrupando
+  las que comparten el mismo `fecha_utc` visto, ya que desde el cambio de
+  arriba una moneda puede tener varias filas en la misma vuelta).
+  Filtrable por moneda O por TF por separado (antes exigia las dos juntas).
+  Primera version solo miraba `posicion_lado` y dejaba las ORDENES
+  pendientes (`orden_pendiente_lado`, aun sin llenar) invisibles del todo -
+  corregido para mostrar ambos estados por separado.
