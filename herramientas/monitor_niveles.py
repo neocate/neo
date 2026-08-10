@@ -45,6 +45,15 @@
 # (evento="senal", tipo=nombre de la señal), para tenerlo todo junto con
 # los toques de nivel y el imbalance/cvd del momento.
 #
+# Las señales se evaluan CON los niveles vigentes de este mismo TF (la
+# misma foto de _armar_watchlist, sin recalcular) - de las 7 que
+# mercado/senales.NIVEL_UTIL_GRUPO_A puede renombrar/filtrar segun el
+# contexto de nivel, solo las 4 de senales.REFINADAS_CONFIRMADAS (edge
+# positivo y consistente en el backtest BTC+ETH 2018-2022) se acaban
+# logueando aqui; las 3 de REFINADAS_EN_PRUEBAS se descartan (no
+# confirmadas todavia - ver mercado/senales.py). El resto de señales
+# (fuera del Grupo A) no se ven afectadas por esto.
+#
 # Historico ANTES de arrancar (2026-08-07): niveles_soporte.py lee de
 # herramientas/libro/historico_<COIN>_<TF>_bitget.csv (ver su cabecera,
 # ahora Bitget en vez de Binance). Si ese fichero no existe o no llega a
@@ -173,6 +182,31 @@ def _velas_nuevas(ruta, ultimo_ts):
                           float(partes[5]), float(partes[6])])
     filas.sort(key=lambda v: v[0])
     return filas
+
+
+def _ultima_fila_coin(ruta, coin):
+    """Ultima fila COMPLETA de 'ruta' (flujo_*.csv de grabador_libro.py)
+    para 'coin' - lee solo la cola del fichero (puede tener decenas de MB
+    tras dias corriendo) en vez de todo, mismo patron que _velas_nuevas.
+    Se descarta la primera linea de la cola por si quedo cortada a medias
+    por el propio seek - sobra margen (256KB) para que la ultima fila de
+    CUALQUIER moneda siga estando mas adelante. None si no hay ninguna."""
+    with open(ruta, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        tam = f.tell()
+        f.seek(max(0, tam - 262_144))
+        cola = f.read()
+    lineas = [l for l in cola.decode("utf-8", errors="replace").split("\n") if l.strip()]
+    if len(lineas) > 1:
+        lineas = lineas[1:]
+    for linea in reversed(lineas):
+        campos = next(csv.reader([linea]))
+        if len(campos) != len(CAMPOS_LIBRO):
+            continue
+        fila = dict(zip(CAMPOS_LIBRO, campos))
+        if fila.get("coin") == coin.upper():
+            return fila
+    return None
 
 
 def _primer_timestamp_ms(ruta):
@@ -363,12 +397,37 @@ def main():
         time.sleep(cada)
         ruta_libro = _localizar_csv_libro(coin)
     print(f"Leyendo de {ruta_libro} (solo lineas nuevas desde ahora).")
-    print("Ctrl+C para parar.\n")
 
     offset = os.path.getsize(ruta_libro)
     for niv in watch:
         niv["tocando"] = False
     ultimo_imbalance = ultimo_cvd = None
+
+    # Estado inicial desde la ULTIMA fila ya grabada (no se relee ni se
+    # avisa nada del historico viejo - offset ya quedo al final, arriba -
+    # esto solo evita arrancar a ciegas: sin esto, imbalance/cvd empiezan
+    # en None y todos los niveles en tocando=False aunque el precio YA
+    # estuviera dentro de la tolerancia de alguno, hasta que llegue el
+    # primer tick nuevo.
+    fila_inicial = _ultima_fila_coin(ruta_libro, coin)
+    if fila_inicial:
+        precio_inicial = _flt(fila_inicial.get("mid"))
+        if precio_inicial is None:
+            bid, ask = _flt(fila_inicial.get("bid")), _flt(fila_inicial.get("ask"))
+            precio_inicial = (bid + ask) / 2 if (bid is not None and ask is not None) else None
+        ultimo_imbalance = _flt(fila_inicial.get("imbalance"))
+        ultimo_cvd = _flt(fila_inicial.get("cvd"))
+        if precio_inicial is not None:
+            for niv in watch:
+                niv["tocando"] = (niv["precio"] - niv["tolerancia"]) <= precio_inicial <= (niv["precio"] + niv["tolerancia"])
+            print(f"Estado inicial ({fila_inicial.get('fecha_utc', '?')}): precio {precio_inicial:.4f}  "
+                  f"imbalance {(ultimo_imbalance or 0.0):+.2f}  cvd {(ultimo_cvd or 0.0):+.4f}")
+            for niv in watch:
+                if niv["tocando"]:
+                    etiqueta = f" [{niv['origen']}]" if niv["origen"] == "macro" else ""
+                    print(f"  ya esta tocando {niv['tipo']} {niv['precio']:.4f}{etiqueta}")
+
+    print("Ctrl+C para parar.\n")
 
     # Solo se necesita historico reciente para las señales (ver
     # senales.VENTANA_MAXIMA) - r["velas"] trae hasta 90 dias completos
@@ -377,6 +436,17 @@ def main():
     velas = r["velas"][-senales.VENTANA_MAXIMA:]
     ruta_historico = _archivo_bitget(coin, tf)
     ultimo_ts_vela = velas[-1][0] if velas else None
+
+    # Niveles para el filtro de contexto del Grupo A (ver cabecera) - se
+    # usa r["techos"]/r["suelos"] (ya agrupados por ROL EFECTIVO, con el
+    # flip aplicado - ver _rol_efectivo en niveles_soporte.py) en vez del
+    # campo "tipo" de 'watch', que para un nivel con flip sigue guardando
+    # el tipo ORIGINAL. Misma tolerancia que ya usa la watchlist del TF
+    # micro (r["tolerancia"]) - sin --tf-macro en esto, igual que el
+    # backtest que lo valido (ver herramientas/backtest_senales.py).
+    niveles_vigentes = ([(n["precio"], "techo") for n in r["techos"]]
+                         + [(n["precio"], "suelo") for n in r["suelos"]])
+    tolerancia_nivel = r["tolerancia"]
     ultimo_refresco_velas = time.monotonic()
     print(f"Señales de vela ({tf}) revisadas cada {velas_cada:.0f}s tras refrescar el historico.\n")
 
@@ -451,7 +521,11 @@ def main():
                     velas.append(nueva)
                     del velas[:-senales.VENTANA_MAXIMA]
                     ultimo_ts_vela = nueva[0]
-                    for nombre in senales.detectar(velas, k):
+                    activas = senales.detectar(velas, k, niveles_vigentes=niveles_vigentes,
+                                                tolerancia_nivel=tolerancia_nivel)
+                    for nombre in activas:
+                        if nombre in senales.REFINADAS_EN_PRUEBAS:
+                            continue
                         fecha_vela = datetime.fromtimestamp(nueva[0] / 1000, timezone.utc)
                         print(f"  >>> SENAL {nombre}  cierre {nueva[4]:.4f}  "
                               f"({fecha_vela:%Y-%m-%d %H:%M} UTC, vela {tf})")
