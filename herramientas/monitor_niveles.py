@@ -54,6 +54,12 @@
 # confirmadas todavia - ver mercado/senales.py). El resto de señales
 # (fuera del Grupo A) no se ven afectadas por esto.
 #
+# Cada una de esas 4 confirmadas TAMBIEN se manda a Telegram via
+# alertas.avisos.enviar(). Sin TELEGRAM_TOKEN/TELEGRAM_CHAT_ID en .env,
+# enviar() no hace nada - no hace falta configurarlo para que el monitor
+# funcione. Los toques de nivel y las señales sin confirmar NO se mandan,
+# solo se quedan en el CSV - mandar cada toque seria demasiado ruido.
+#
 # Historico ANTES de arrancar (2026-08-07): niveles_soporte.py lee de
 # herramientas/libro/historico_<COIN>_<TF>_bitget.csv (ver su cabecera,
 # ahora Bitget en vez de Binance). Si ese fichero no existe o no llega a
@@ -91,6 +97,7 @@ from herramientas.descargar_bit import (
     descargar as _descargar_bitget, actualizar as _actualizar_bitget,
 )
 from mercado import senales
+from alertas import avisos
 
 CAMPOS_AVISOS = ["timestamp_ms", "fecha_utc", "coin", "evento", "tipo", "origen",
                   "nivel_precio", "precio_actual", "imbalance", "cvd"]
@@ -542,6 +549,10 @@ def main():
                             "cvd": round(ultimo_cvd, 4) if ultimo_cvd is not None else "",
                         })
                         log.flush()
+                        avisos.enviar(
+                            f"{coin.upper()} {tf}  {nombre}\n"
+                            f"cierre {nueva[4]:.4f}  ({fecha_vela:%Y-%m-%d %H:%M} UTC)"
+                        )
 
             time.sleep(cada)
     except KeyboardInterrupt:
