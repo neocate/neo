@@ -549,10 +549,11 @@ def main():
                             "cvd": round(ultimo_cvd, 4) if ultimo_cvd is not None else "",
                         })
                         log.flush()
-                        avisos.enviar(
-                            f"{coin.upper()} {tf}  {nombre}\n"
-                            f"cierre {nueva[4]:.4f}  ({fecha_vela:%Y-%m-%d %H:%M} UTC)"
-                        )
+                        if nombre in senales.REFINADAS_CONFIRMADAS:
+                            avisos.enviar(
+                                f"{coin.upper()} {tf}  {nombre}\n"
+                                f"cierre {nueva[4]:.4f}  ({fecha_vela:%Y-%m-%d %H:%M} UTC)"
+                            )
 
             time.sleep(cada)
     except KeyboardInterrupt:
