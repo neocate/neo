@@ -1,5 +1,112 @@
 # Anotaciones
 
+- 2026-08-10: Rama `senales-vela` creada, bifurcada de `4524945` (el commit
+  "solo herramientas/mercado", antes de que existiera `monitor.py`
+  multi-posicion). Decision del usuario tras confirmar que en 2 semanas
+  `monitor.py` en vivo no dio resultados ("no hemos conseguido pasarlo a
+  verde") - lo va a parar. `master` en GitHub queda intacto (con el fix de
+  locking `5062332` y el modulo `monitor.py`/`telegram_control.py`/
+  `alertas`/`estrategia`/`posicion`/`registro` de `5bbf05e`) por si se
+  retoma mas adelante - esta rama es un desarrollo aparte, no lo toca.
+
+- 2026-08-10: `mercado/senales.py` creado - 12 señales de VELA (impulso/
+  aceleracion/ruptura/rechazo/divergencia RSI/RSI extremo), sobre velas YA
+  CERRADAS (mismo criterio que `descargar_bit.py`). A diferencia de
+  `flujo.py` (libro de ordenes, irreconstruible - ver entradas de
+  `grabador_libro.py` mas abajo), esto trabaja sobre velas: se puede
+  recalcular en frio en cualquier momento. `detectar(velas, k)` acota
+  internamente a `VENTANA_MAXIMA=500` velas antes de tocar
+  `indicadores.atr()/rsi()` - si no, un caller que le pase el historico
+  completo (90 dias de 1m son ~130k filas) y la llame en CADA vela nueva
+  durante una sesion larga hace que el costo por vela crezca sin limite
+  (Wilder decae exponencial - a partir de unas pocas centenas de velas la
+  diferencia frente a usar todo el historico es insignificante).
+
+- 2026-08-10: `herramientas/backtest_senales.py` creado - backtest OFFLINE
+  de `senales.py` sobre historico profundo (`historicos/` de Binance o
+  `herramientas/libro/` de Bitget), sin depender de sesion en vivo. Mide
+  retorno medio a N velas por señal, ajustado por la tendencia neta del
+  periodo (`edge@N = ret@N - direccion*baseline@N` - comparar contra el
+  baseline crudo sin ajustar de signo favorece a ciegas a las señales que
+  apuestan a favor de la tendencia del periodo probado). `--desde-1m`
+  agrega velas desde 1m en vez de usar el historico nativo del TF (para
+  comparar fuentes offline, sin tocar `monitor_niveles.py` con esto).
+
+- 2026-08-10: `backtest_senales.py --tolerancia-atr/--toques-min` -
+  contraste de señales por contexto de nivel vigente (favorable/contrario/
+  lejos, via `niveles_soporte.detectar_niveles`+`_evaluar_estado`). Los
+  niveles se RECALCULAN cada `--refresco-niveles` dias (ventana movil de
+  `DIAS_NIVELES_PREVIOS=90` dias) en vez de una foto fija tomada en
+  `--desde` - con periodos de años, una foto fija queda obsoleta enseguida
+  (niveles de 2018 no significan nada en 2021). Ademas, si el precio hizo
+  tendencia limpia en la ventana previa, solo confirma niveles de UN lado
+  (BTC ago-nov 2018: 105 niveles, TODOS techo, cero suelo - con
+  `--toques-min 4` casi nunca confirma un suelo en caida libre, cada
+  minimo se deja atras sin retest).
+
+- 2026-08-10: Hallazgo del "Grupo A" (backtest BTC+ETH 2018-2022, 15m/1h/
+  4h, agregado desde 1m, niveles con refresco cada 30 dias): 7 de las 12
+  señales dan mejor edge cuando hay un nivel vigente del tipo CONTRARIO a
+  su propia direccion cerca (ej. `ruptura_alza` funciona mejor rompiendo
+  una resistencia real que en espacio abierto) - justo lo opuesto de la
+  intuicion de "nivel a mi favor". De esas 7, solo 4 confirman edge@30
+  positivo Y consistente en las 6 combinaciones moneda/TF:
+  `ruptura_alza_en_resistencia`, `aceleracion_baja_en_soporte`,
+  `rechazo_max_en_soporte`, `ruptura_baja_en_soporte`
+  (`senales.REFINADAS_CONFIRMADAS`). Las otras 3
+  (`rsi_sobrecompra_en_soporte`, `rsi_sobreventa_en_resistencia`,
+  `div_bajista_en_soporte`) mejoraron frente a su version sin filtrar pero
+  siguen sin edge fiable (`REFINADAS_EN_PRUEBAS`) - probablemente les
+  falte un filtro de regimen (ver siguiente entrada). `senales.detectar()`
+  acepta `niveles_vigentes`/`tolerancia_nivel` opcionales (compatibles con
+  las llamadas existentes que no pasan nada) para aplicar este
+  filtro/renombrado.
+
+- 2026-08-10: `rsi_sobreventa` cambia de SIGNO segun el regimen probado -
+  edge@30 positivo (+0.5 a +0.8) en la ventana 2022-2026 (mayormente
+  alcista), negativo (-0.5 a -0.9) en 2018-2022 (mezcla alcista/bajista) y
+  en los 8 años completos. Confirma que las señales de REVERSION dependen
+  del regimen del periodo probado, a diferencia de las de CONTINUACION
+  (`ruptura_alza`/`impulso_alza`), que salen positivas en todas las
+  ventanas probadas. Pendiente: filtro de regimen (tendencia de fondo, ej.
+  pendiente de EMA larga o ADX) para las 3 de `REFINADAS_EN_PRUEBAS` - no
+  implementado todavia.
+
+- 2026-08-10: `monitor_niveles.py` conectado en vivo con las 4 señales
+  confirmadas del Grupo A - evalua `senales.detectar()` con
+  `niveles_vigentes` construido de `r["techos"]/r["suelos"]` (agrupados
+  por ROL EFECTIVO, ya con el flip aplicado - OJO, el campo `tipo` de
+  `watch` NO es fiable para esto, guarda el tipo ORIGINAL aunque el nivel
+  haya hecho flip; hay que usar el grupo `r["techos"]`/`r["suelos"]`, no
+  `n["tipo"]`) y la MISMA tolerancia que ya usa la watchlist
+  (`r["tolerancia"]`). Solo un TF para esto (sin `--tf-macro`), igual que
+  el backtest que lo valido.
+
+- 2026-08-10: `monitor_niveles.py` - arranque con estado real:
+  `_ultima_fila_coin()` lee la ULTIMA fila ya grabada del flujo (cola de
+  256KB, no el fichero entero) para fijar `imbalance`/`cvd` desde el
+  primer segundo y marcar bien que niveles ya estan "tocando" en ese
+  momento - antes arrancaba siempre en blanco (`None`/`False` en todos)
+  hasta el primer tick nuevo, aunque el precio YA estuviera dentro de
+  tolerancia de algun nivel. Decision explicita del usuario: NO reproducir
+  todo el historico de flujo ya grabado (se penso, se descarto) - los
+  timestamps de los avisos quedarian mal (todo con la hora de "ahora"
+  aunque el evento real fuera de hace horas) y seria mucho ruido de golpe.
+
+- 2026-08-10: Telegram - `telegram_control.py` (panel de comandos completo
+  del `monitor.py` multi-posicion: abrir procesos, ajustar parametros en
+  caliente, cartera, menus de botones inline) ELIMINADO en esta rama -
+  dependia enteramente de `import monitor`, que no existe aqui (ver
+  primera entrada de hoy). `alertas/avisos.py` (ya existente, `enviar
+  (texto)` simple via `.env`) se conecta directo en `monitor_niveles.py`:
+  manda Telegram SOLO cuando dispara una de las 4 confirmadas
+  (`REFINADAS_CONFIRMADAS`) - los toques de nivel y las señales sin
+  confirmar se quedan en el CSV, no se mandan (demasiado ruido). Bug
+  detectado y arreglado el mismo dia: el envio estaba en el bucle que
+  procesa TODAS las señales activas (incluidas las 5 fuera del Grupo A,
+  tipo `rechazo_min`), no solo las 4 confirmadas - `rechazo_min` llego a
+  mandar un Telegram real antes del fix.
+
 - 2026-08-08: `monitor_niveles.py` - `_asegurar_historico()` disparaba una
   descarga completa (`descargar()`, que REESCRIBE el CSV entero) por cada TF
   que no llegara a `--desde-dias` de profundidad. Si se lanzaban DOS
