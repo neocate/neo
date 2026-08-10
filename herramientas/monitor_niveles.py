@@ -38,6 +38,13 @@
 # (avisos_<fecha>_<coin>_<tf>.csv) - timestamp, evento, nivel, precio,
 # imbalance, cvd en ese momento, para revisar despues o cruzar con el resto.
 #
+# Ademas de los toques de nivel, cada --velas-cada segundos se revisa si
+# cerro una vela nueva del TF vigilado y se evaluan sobre ella las señales
+# de mercado/senales.py (impulso, ruptura, rechazo, divergencia RSI) - se
+# graban en el MISMO CSV de avisos, con origen "vela" y nivel_precio vacio
+# (evento="senal", tipo=nombre de la señal), para tenerlo todo junto con
+# los toques de nivel y el imbalance/cvd del momento.
+#
 # Historico ANTES de arrancar (2026-08-07): niveles_soporte.py lee de
 # herramientas/libro/historico_<COIN>_<TF>_bitget.csv (ver su cabecera,
 # ahora Bitget en vez de Binance). Si ese fichero no existe o no llega a
@@ -53,7 +60,7 @@
 # re-bajarlo completo.
 #
 # Uso:
-#   python herramientas/monitor_niveles.py <coin> <tf> --k 3 --tolerancia-atr 0.25 --toques-min 4 [--desde-dias 90] [--tf-macro 4h] [--cada 15]
+#   python herramientas/monitor_niveles.py <coin> <tf> --k 3 --tolerancia-atr 0.25 --toques-min 4 [--desde-dias 90] [--tf-macro 4h] [--cada 15] [--velas-cada 60]
 #
 # Ejemplo:
 #   python herramientas/monitor_niveles.py eth 1h --k 3 --tolerancia-atr 0.25 --toques-min 4 --desde-dias 90 --tf-macro 4h
@@ -74,6 +81,7 @@ from herramientas.descargar_bit import (
     DIR_LIBRO, _archivo as _archivo_bitget,
     descargar as _descargar_bitget, actualizar as _actualizar_bitget,
 )
+from mercado import senales
 
 CAMPOS_AVISOS = ["timestamp_ms", "fecha_utc", "coin", "evento", "tipo", "origen",
                   "nivel_precio", "precio_actual", "imbalance", "cvd"]
@@ -138,6 +146,33 @@ def _tail_csv(ruta, offset):
     texto = bloque.decode("utf-8", errors="replace")
     filas = list(csv.DictReader(io.StringIO(texto), fieldnames=CAMPOS_LIBRO))
     return filas, nuevo_offset
+
+
+def _velas_nuevas(ruta, ultimo_ts):
+    """Filas del historico (mismo formato que descargar_bit.py: timestamp,
+    fecha_utc,open,high,low,close,volumen) con timestamp > 'ultimo_ts'.
+
+    Lee solo la COLA del fichero (igual que _ultimo_timestamp_ms de
+    descargar_bit.py) en vez de reparsear el historico completo en cada
+    refresco - puede tener decenas de miles de filas (90 dias de 1m).
+    1MB de cola sobra para cualquier '--velas-cada' razonable."""
+    with open(ruta, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        tam = f.tell()
+        f.seek(max(0, tam - 1_000_000))
+        cola = f.read()
+    filas = []
+    for linea in cola.split(b"\n"):
+        linea = linea.strip()
+        if not linea or linea.startswith(b"timestamp"):
+            continue
+        partes = linea.decode("utf-8").split(",")
+        ts = int(partes[0])
+        if ts > ultimo_ts:
+            filas.append([ts, float(partes[2]), float(partes[3]), float(partes[4]),
+                          float(partes[5]), float(partes[6])])
+    filas.sort(key=lambda v: v[0])
+    return filas
 
 
 def _primer_timestamp_ms(ruta):
@@ -265,6 +300,7 @@ def main():
     confirmacion_velas = 2
     tf_macro = None
     cada = 15.0
+    velas_cada = 60.0
     i = 0
     while i < len(resto):
         if resto[i] == "--k":
@@ -281,6 +317,8 @@ def main():
             i += 1; tf_macro = resto[i]
         elif resto[i] == "--cada":
             i += 1; cada = float(resto[i])
+        elif resto[i] == "--velas-cada":
+            i += 1; velas_cada = float(resto[i])
         i += 1
 
     if k is None or tolerancia_atr is None or toques_min is None:
@@ -331,6 +369,16 @@ def main():
     for niv in watch:
         niv["tocando"] = False
     ultimo_imbalance = ultimo_cvd = None
+
+    # Solo se necesita historico reciente para las señales (ver
+    # senales.VENTANA_MAXIMA) - r["velas"] trae hasta 90 dias completos
+    # (para detectar_niveles), pero arrastrar eso en memoria y recortarlo de
+    # nuevo en CADA vela nueva durante una sesion larga es trabajo de sobra.
+    velas = r["velas"][-senales.VENTANA_MAXIMA:]
+    ruta_historico = _archivo_bitget(coin, tf)
+    ultimo_ts_vela = velas[-1][0] if velas else None
+    ultimo_refresco_velas = time.monotonic()
+    print(f"Señales de vela ({tf}) revisadas cada {velas_cada:.0f}s tras refrescar el historico.\n")
 
     try:
         while True:
@@ -395,6 +443,31 @@ def main():
                         "cvd": round(ultimo_cvd, 4) if ultimo_cvd is not None else "",
                     })
                     log.flush()
+
+            if ultimo_ts_vela is not None and time.monotonic() - ultimo_refresco_velas >= velas_cada:
+                ultimo_refresco_velas = time.monotonic()
+                _actualizar_bitget(coin, tf, desde=desde_dias)
+                for nueva in _velas_nuevas(ruta_historico, ultimo_ts_vela):
+                    velas.append(nueva)
+                    del velas[:-senales.VENTANA_MAXIMA]
+                    ultimo_ts_vela = nueva[0]
+                    for nombre in senales.detectar(velas, k):
+                        fecha_vela = datetime.fromtimestamp(nueva[0] / 1000, timezone.utc)
+                        print(f"  >>> SENAL {nombre}  cierre {nueva[4]:.4f}  "
+                              f"({fecha_vela:%Y-%m-%d %H:%M} UTC, vela {tf})")
+                        writer.writerow({
+                            "timestamp_ms": int(datetime.now(timezone.utc).timestamp() * 1000),
+                            "fecha_utc": _fmt_fecha_ahora(),
+                            "coin": coin.upper(),
+                            "evento": "senal",
+                            "tipo": nombre,
+                            "origen": "vela",
+                            "nivel_precio": "",
+                            "precio_actual": nueva[4],
+                            "imbalance": round(ultimo_imbalance, 4) if ultimo_imbalance is not None else "",
+                            "cvd": round(ultimo_cvd, 4) if ultimo_cvd is not None else "",
+                        })
+                        log.flush()
 
             time.sleep(cada)
     except KeyboardInterrupt:
