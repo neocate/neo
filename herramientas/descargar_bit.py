@@ -21,17 +21,37 @@
 # (mismo sitio que flujo_*.csv de grabador_libro.py - todo lo de una sesion
 # de captura en vivo junto, para las pruebas en frio despues).
 #
-# Dos formas de usarlo:
+# Tres formas de usarlo:
 #   descargar(coin, tf, desde=...)  - SIEMPRE reescribe el fichero entero
 #                                      desde 'desde' (o todo el historico).
 #                                      Uso manual/puntual.
-#   actualizar(coin, tf)            - si no hay fichero previo, baja todo
-#                                      (como descargar()); si ya existe, lee
-#                                      la ultima vela guardada y solo pide/
-#                                      AÑADE lo que falta (append, sin
-#                                      reescribir) - pensado para refrescar
-#                                      seguido (ver grabador_libro.py) sin
-#                                      volver a bajar todo cada vez.
+#   actualizar(coin, tf)            - si no hay fichero previo, baja
+#                                      exactamente 'velas_objetivo' velas (no
+#                                      de mas); si ya existe, lee la ultima
+#                                      vela guardada y solo pide/AÑADE lo que
+#                                      falta (append, sin reescribir), y
+#                                      recorta el fichero si se pasa del cap
+#                                      por margen de holgura. Pensado para
+#                                      refrescar seguido sin bajar todo cada
+#                                      vez.
+#   --feed                          - modo daemon: corre sin parar en el NAS
+#                                      (independiente de grabador_libro.py,
+#                                      que solo graba libro/OI/funding/CVD -
+#                                      ver su cabecera) llamando a
+#                                      actualizar() por cada coin/tf cada
+#                                      '--cada' segundos. Unico dueño de
+#                                      mantener al dia herramientas/libro/
+#                                      historico_<COIN>_<TF>_bitget.csv - el
+#                                      resto de modulos (niveles_soporte.py,
+#                                      monitor_niveles.py) son lectores puros.
+#
+# El cap de velas guardadas (VELAS_OBJETIVO, un solo numero para todos los
+# TF) no es un limite de memoria (el CSV mas grande no pasa de unos pocos MB)
+# sino de relevancia: niveles_soporte.py es quien mas velas de contexto
+# necesita, y un numero fijo de VELAS (no de dias) escala solo por TF sin
+# tabla ni formula - en 1m son unas pocas horas, en 4h son semanas. Guardar
+# "90 dias" fijos no tiene sentido en TF finos (un nivel de hace 90 dias en
+# 1m ya esta roto o irrelevante - ver anotaciones.md).
 #
 # Uso:
 #   python descargar_bit.py <coin> <timeframe> [desde]
@@ -40,21 +60,31 @@
 #     desde:      opcional. 'YYYY-MM-DD'  o  número de días hacia atrás.
 #                 Si se omite, baja TODO el histórico disponible (bastante
 #                 menos profundo que Binance).
+#   python descargar_bit.py --feed [coin[,coin2,...]] [--tfs 1m,5m,15m,30m,1h,4h,1d]
+#                            [--velas-objetivo 500] [--cada 60]
 #
 # Ejemplos:
 #   python descargar_bit.py btc 5m 1
 #   python descargar_bit.py eth 15m 2023-01-01
+#   python descargar_bit.py --feed btc,eth --cada 60
 # ---------------------------------------------------------------
 
 import csv
 import os
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import ccxt
 
 DIR_LIBRO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libro")
+
+VELAS_OBJETIVO = 500  # niveles_soporte.py es el consumidor mas exigente;
+                       # cubriendolo, senales.VENTANA_MAXIMA (tambien 500)
+                       # queda cubierto igual - ver cabecera de este fichero.
+
+TIMEFRAMES_FEED = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 
 
 def _simbolo(coin):
@@ -101,6 +131,60 @@ def _ultimo_timestamp_ms(ruta):
         cola = f.read()
     lineas = [l for l in cola.split(b'\n') if l.strip()]
     return int(lineas[-1].split(b',')[0])
+
+
+def _segundos_tf(timeframe):
+    mult = {"m": 60, "h": 3600, "d": 86400}
+    return int(timeframe[:-1]) * mult[timeframe[-1]]
+
+
+def _recortar_si_hace_falta(ruta, cap, margen=0.10):
+    """Recorta 'ruta' a las ultimas 'cap' velas, pero SOLO si se pasa del cap
+    por un margen de holgura (10% por defecto) - con cap=500 esto reescribe
+    el fichero cada ~50 velas nuevas, no en cada vuelta del feed. Reescritura
+    en streaming (sin cargar todo en memoria) + os.replace() atomico, para
+    que ningun lector en vivo vea nunca el fichero a medio escribir."""
+    with open(ruta, 'r', newline='') as f:
+        total = sum(1 for _ in f) - 1  # menos cabecera
+    if total <= cap * (1 + margen):
+        return
+    tmp = ruta + ".tmp"
+    with open(ruta, 'r', newline='') as fin, open(tmp, 'w', newline='') as fout:
+        fout.write(fin.readline())  # cabecera
+        a_saltar = total - cap
+        for i, linea in enumerate(fin):
+            if i >= a_saltar:
+                fout.write(linea)
+    os.replace(tmp, ruta)
+
+
+@contextmanager
+def _con_lock(ruta, timeout=1800.0, espera=2.0):
+    """Lock de fichero por creacion atomica (O_CREAT|O_EXCL, '<ruta>.lock')
+    para que dos escritores (el feed y una ejecucion manual puntual) no
+    toquen el mismo historico a la vez - el peor momento para pisarse es
+    durante un recorte (_recortar_si_hace_falta reescribe el fichero
+    entero). Los lectores (niveles_soporte.py, monitor_niveles.py) NO
+    necesitan este lock: ya tratan una fila a medio escribir al final del
+    fichero como no consumida todavia (mismo patron que _tail_csv usa para
+    flujo_*.csv), y _recortar_si_hace_falta usa os.replace() atomico, asi
+    que un lector con el fichero ya abierto sigue viendo el contenido viejo
+    completo hasta que lo reabra."""
+    ruta_lock = ruta + ".lock"
+    inicio = time.monotonic()
+    while True:
+        try:
+            fd = os.open(ruta_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            break
+        except FileExistsError:
+            if time.monotonic() - inicio > timeout:
+                raise TimeoutError(f"lock de {ruta} no liberado tras {timeout:.0f}s")
+            time.sleep(espera)
+    try:
+        yield
+    finally:
+        os.remove(ruta_lock)
 
 
 def _descargar_rango(cliente, simbolo, timeframe, since, hasta_ms, limite_req=200):
@@ -168,37 +252,92 @@ def descargar(coin, timeframe, desde=None, limite_req=200):
     return nombre
 
 
-def actualizar(coin, timeframe, desde=None, limite_req=200):
-    """Si NO hay fichero previo para esta coin/tf: descarga desde 'desde'
-    (mismo formato que descargar() - None = todo el historico). Si YA
-    existe: ignora 'desde', lee la ultima vela guardada y solo pide/AÑADE
-    lo que falta, sin reescribir el fichero entero."""
-    ruta = _archivo(coin, timeframe)
-    if not os.path.exists(ruta):
-        return descargar(coin, timeframe, desde=desde, limite_req=limite_req)
-
+def actualizar(coin, timeframe, velas_objetivo=VELAS_OBJETIVO, limite_req=200):
+    """Si NO hay fichero previo para esta coin/tf: descarga exactamente
+    'velas_objetivo' velas (calculado directamente por tiempo, sin bajar de
+    mas para luego recortar). Si YA existe: lee la ultima vela guardada y
+    solo pide/AÑADE lo que falta, sin reescribir el fichero entero. En
+    ambos casos, al final recorta el fichero a 'velas_objetivo' si se pasa
+    del cap por margen de holgura (ver _recortar_si_hace_falta)."""
     cliente = ccxt.bitget({'enableRateLimit': True})
     simbolo = _simbolo(coin)
-    tf_ms = cliente.parse_timeframe(timeframe) * 1000
+    ruta = _archivo(coin, timeframe)
     hasta_ms = _hasta_ms_cerrado(cliente, timeframe)
 
-    ultimo_ts = _ultimo_timestamp_ms(ruta)
-    since = ultimo_ts + tf_ms
-    if since >= hasta_ms:
-        return ruta  # ya al dia - se llama seguido desde grabador_libro.py
+    if not os.path.exists(ruta):
+        since = hasta_ms - velas_objetivo * _segundos_tf(timeframe) * 1000
+        print(f"Descargando {simbolo} {timeframe}: {velas_objetivo:.0f} velas ...")
+        velas = _descargar_rango(cliente, simbolo, timeframe, since, hasta_ms, limite_req)
+        if not velas:
+            print("No se descargó nada (¿símbolo o timeframe inválido?).")
+            return ruta
+        with open(ruta, 'w', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(['timestamp', 'fecha_utc', 'open', 'high', 'low', 'close', 'volumen'])
+            _escribir_filas(f, velas)
+        print(f"  [OK] {simbolo} {timeframe}: {len(velas)} velas guardadas en {ruta}")
+    else:
+        tf_ms = cliente.parse_timeframe(timeframe) * 1000
+        ultimo_ts = _ultimo_timestamp_ms(ruta)
+        since = ultimo_ts + tf_ms
+        if since < hasta_ms:
+            nuevas = _descargar_rango(cliente, simbolo, timeframe, since, hasta_ms, limite_req)
+            if nuevas:
+                with open(ruta, 'a', newline='') as f:
+                    _escribir_filas(f, nuevas)
+                print(f"  [OK] {simbolo} {timeframe}: +{len(nuevas)} velas "
+                      f"(hasta {datetime.fromtimestamp(nuevas[-1][0]/1000, timezone.utc):%Y-%m-%d %H:%M} UTC)")
 
-    nuevas = _descargar_rango(cliente, simbolo, timeframe, since, hasta_ms, limite_req)
-    if not nuevas:
-        return ruta
-
-    with open(ruta, 'a', newline='') as f:
-        _escribir_filas(f, nuevas)
-    print(f"  [OK] {simbolo} {timeframe}: +{len(nuevas)} velas "
-          f"(hasta {datetime.fromtimestamp(nuevas[-1][0]/1000, timezone.utc):%Y-%m-%d %H:%M} UTC)")
+    _recortar_si_hace_falta(ruta, velas_objetivo)
     return ruta
 
 
+def _feed(coins, tfs, velas_objetivo, cada):
+    """Modo daemon: mantiene al dia (y acotado a 'velas_objetivo') el
+    historico de cada coin/tf, sin parar, con lock para no pisarse con una
+    ejecucion manual concurrente (ver _con_lock). Un fallo puntual de una
+    coin/tf (red, símbolo) no debe tumbar el proceso - se avisa y se sigue
+    con el resto, misma filosofia de resiliencia que grabador_libro.py."""
+    print(f"Feed de velas Bitget: {', '.join(coins)} / {', '.join(tfs)} "
+          f"(velas_objetivo={velas_objetivo:.0f}, cada={cada:.0f}s). Ctrl+C para parar.")
+    try:
+        while True:
+            for coin in coins:
+                for tf in tfs:
+                    try:
+                        with _con_lock(_archivo(coin, tf)):
+                            actualizar(coin, tf, velas_objetivo=velas_objetivo)
+                    except Exception as e:
+                        print(f"  (aviso) {coin} {tf}: {e}")
+            time.sleep(cada)
+    except KeyboardInterrupt:
+        print("\nParado por el usuario.")
+
+
 def main():
+    args = sys.argv[1:]
+    if args and args[0] == "--feed":
+        args = args[1:]
+        if args and not args[0].startswith("--"):
+            coins = [c.strip().upper() for c in args[0].split(",")]
+            args = args[1:]
+        else:
+            coins = ["BTC", "ETH"]
+        tfs = TIMEFRAMES_FEED
+        velas_objetivo = VELAS_OBJETIVO
+        cada = 60.0
+        i = 0
+        while i < len(args):
+            if args[i] == "--tfs":
+                i += 1; tfs = [t.strip() for t in args[i].split(",")]
+            elif args[i] == "--velas-objetivo":
+                i += 1; velas_objetivo = float(args[i])
+            elif args[i] == "--cada":
+                i += 1; cada = float(args[i])
+            i += 1
+        _feed(coins, tfs, velas_objetivo, cada)
+        return
+
     if len(sys.argv) < 3:
         print("Uso: python descargar_bit.py <coin> <timeframe> [desde]")
         print("  coin:      eth, btc, icp, sol...  (o ETH/USDT:USDT)")
@@ -207,6 +346,9 @@ def main():
         print("\nEjemplos:")
         print("  python descargar_bit.py btc 5m 1")
         print("  python descargar_bit.py eth 15m 2023-01-01")
+        print("\nModo daemon (siempre corriendo, ver cabecera del fichero):")
+        print("  python descargar_bit.py --feed [coin[,coin2,...]] [--tfs 1m,5m,15m,30m,1h,4h,1d]")
+        print("                           [--velas-objetivo 500] [--cada 60]")
         return
     coin = sys.argv[1]
     timeframe = sys.argv[2]
