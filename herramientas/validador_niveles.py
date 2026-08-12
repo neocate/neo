@@ -111,23 +111,31 @@ def _evaluar_confirmacion(nombre, precio, techos, suelos, tolerancia):
     return rol, distancia <= tolerancia, niv_cercano["precio"], distancia
 
 
-def _imprimir_confirmaciones(confirmaciones):
+def _texto_confirmaciones(confirmaciones):
+    """Texto de la tabla de confirmaciones, o "" si no hay datos - una
+    funcion que DEVUELVE texto en vez de imprimir directo (2026-08-12),
+    para que tanto el propio proceso (que lo imprime) como
+    telegram_control.py (que lo manda por Telegram) usen la misma tabla
+    sin duplicar el formato."""
     if not confirmaciones:
-        return
-    print(f"\n{'señal':<28}{'rol':<8}{'confirmada':>11}{'no confirm.':>13}{'% confirmada':>14}")
+        return ""
+    lineas = [f"{'señal':<28}{'rol':<8}{'confirmada':>11}{'no confirm.':>13}{'% confirmada':>14}"]
     for nombre in sorted(confirmaciones):
         c = confirmaciones[nombre]
         total = c["confirmada"] + c["no_confirmada"]
         pct = (c["confirmada"] / total * 100) if total else 0.0
-        print(f"{nombre:<28}{c['rol']:<8}{c['confirmada']:>11}{c['no_confirmada']:>13}{pct:>13.1f}%")
+        lineas.append(f"{nombre:<28}{c['rol']:<8}{c['confirmada']:>11}{c['no_confirmada']:>13}{pct:>13.1f}%")
+    return "\n".join(lineas)
 
 
 def _consultar(coin, tf):
+    """Texto del marcador acumulado de 'coin'/'tf' - usado tanto por
+    --consultar (se imprime tal cual) como por telegram_control.py (se
+    manda tal cual)."""
     ruta = os.path.join(DIR_LIBRO, f"confirmaciones_{coin.upper()}_{tf}.csv")
     if not os.path.exists(ruta):
-        print(f"No hay {ruta} todavia - validador_niveles.py no ha evaluado ninguna señal "
-              f"para {coin.upper()} {tf} (¿esta corriendo el proceso en vivo?).")
-        return
+        return (f"No hay {ruta} todavia - validador_niveles.py no ha evaluado ninguna señal "
+                f"para {coin.upper()} {tf} (¿esta corriendo el proceso en vivo?).")
     confirmaciones = {}
     with open(ruta, newline="") as f:
         for fila in csv.DictReader(f):
@@ -136,8 +144,9 @@ def _consultar(coin, tf):
                 continue
             c = confirmaciones.setdefault(nombre, {"rol": rol, "confirmada": 0, "no_confirmada": 0})
             c["confirmada" if fila.get("confirmada") == "1" else "no_confirmada"] += 1
-    print(f"=== Confirmaciones acumuladas {coin.upper()} {tf} ({ruta}) ===")
-    _imprimir_confirmaciones(confirmaciones)
+    texto = _texto_confirmaciones(confirmaciones)
+    return f"=== Confirmaciones acumuladas {coin.upper()} {tf} ===\n{texto}" if texto else \
+        f"Sin confirmaciones todavia para {coin.upper()} {tf}."
 
 
 def main():
@@ -146,7 +155,7 @@ def main():
         if len(args) < 3:
             print("Uso: python herramientas/validador_niveles.py --consultar <coin> <tf>")
             return
-        _consultar(args[1], args[2])
+        print(_consultar(args[1], args[2]))
         return
     if len(args) < 2:
         print(__doc__)
@@ -261,7 +270,7 @@ def main():
 
             if time.monotonic() - ultimo_resumen >= resumen_cada:
                 print(f"\n[{_fmt_fecha_ahora()} UTC]")
-                _imprimir_confirmaciones(confirmaciones)
+                print(_texto_confirmaciones(confirmaciones))
                 ultimo_resumen = time.monotonic()
 
             time.sleep(cada)

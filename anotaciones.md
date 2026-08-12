@@ -1,5 +1,148 @@
 # Anotaciones
 
+- 2026-08-12: Telegram pasa a modo SOLO PULL. `herramientas/telegram_control.py`
+  creado (adaptado del patron ya probado en `D:\neocat\bit\telegram_control.py`:
+  mismo `getUpdates`/offset persistido/teclados inline, sin las "ramas"/
+  `PARAMS_AJUSTABLES`/ajuste en caliente de ese otro proyecto, que no aplican
+  aqui) - UNICO proceso que debe hacer `getUpdates` (Telegram reparte los
+  mensajes entre quien pregunte primero, no los duplica si dos procesos
+  hacen polling a la vez). Comandos: `/start` (menu botones), `estado`
+  (que procesos de `herramientas/*.py` siguen vivos, via `ps -ef` - lo que
+  hasta ahora habia que comprobar entrando por SSH a mano),
+  `confirmadas/coin/tf` (ultima vez que disparo cada una de las 4
+  `REFINADAS_CONFIRMADAS`, mismo filtro que usaba `monitor_telegram.py`
+  pero bajo demanda), `confirmaciones/coin/tf` y `tpsl/coin/tf` (tablas de
+  `validador_niveles.py`/`marcador_tpsl.py --consultar`), `resumen` (todo
+  junto). Decision explicita del usuario: `monitor_telegram.py` (aviso
+  automatico push de las 4 confirmadas) se para del todo, no convive con
+  `telegram_control.py` - "SOLO PULL", sin notificacion automatica, solo
+  consulta cuando se pregunta. `validador_niveles._consultar`/
+  `marcador_tpsl._consultar` se refactorizaron de imprimir a DEVOLVER texto
+  para que `telegram_control.py` los reuse sin duplicar el formato de tabla
+  - los procesos en vivo que ya estuvieran corriendo con el codigo viejo
+  (solo imprimian) siguen funcionando igual, `telegram_control.py` importa
+  su propia copia fresca del modulo desde disco y solo comparte con ellos
+  el CSV, no memoria ni proceso.
+
+- 2026-08-12: `herramientas/fjsl.py` construido dos veces y retirado como
+  nombre de fichero. Primera version: sobre-elaborada (ciclo completo de
+  agentes Explore+Plan en modo plan) para acabar siendo, en esencia,
+  `backtest_senales.py` metido en un `while True` con sleep - correccion
+  directa del usuario. Segunda version: tail-based (simulaba TP/SL contra
+  ticks de `flujo_*.csv` en vivo) pero seguia mezclando dos
+  responsabilidades. Version final, separada en dos ficheros ("un .py, una
+  obligacion" otra vez):
+  - `validador_niveles.py`: por cada una de las 7 señales del Grupo A,
+    comprueba si `precio_actual` esta dentro de la tolerancia ATR de un
+    nivel vigente del tipo que esa señal necesita (mismo criterio de
+    "tocando" que `monitor_niveles.py`) - comprobacion de ESTADO (niveles
+    vigentes actuales), no de coincidencia de eventos contra `avisos_*.csv`
+    con ventana de tiempo (simplificacion del propio usuario a mitad de
+    diseño). Independiente de lo que ya implique el nombre renombrado de la
+    señal - puede revelar si esa etiqueta se quedo desactualizada. Escribe
+    `confirmaciones_<COIN>_<TF>.csv`.
+  - `marcador_tpsl.py`: el marcador TP/SL via ATR (WIN/LOSS/TIMEOUT contra
+    flujo en vivo) - deliberadamente NO prioritario ("TP/SL ahora mismo es
+    cazar de noche sin luna a mosquitos con cañones, no tenemos datos
+    suficientes"), preparatorio para una cartera simulada futura (spec
+    completa en la cabecera del fichero: notional 20 USDT, SL 3%/TP 10%,
+    comisiones+funding leidos del contrato real, saldo compuesto entre
+    operaciones - NADA de eso implementado todavia, solo se guardan pares
+    entrada/salida en precio). Escribe `tpsl_<COIN>_<TF>.csv`.
+  El nombre `fjsl.py` queda libre para un futuro orquestador que sume
+  cartera/funding/comisiones de verdad sobre estos dos.
+
+- 2026-08-12: Auto-arranque de dependencias sustituido por una cascada que
+  avisa y para. Antes, `monitor_niveles.py`/`monitor_senales.py` arrancaban
+  ellos mismos `grabador_libro.py`/`descargar_bit.py --feed` si no los
+  encontraban corriendo (`_asegurar_grabador_libro`/`_asegurar_feed_velas`,
+  retirados). Tras liarse relanzando manualmente una cadena larga de
+  procesos y dejarse alguno sin relanzar por error, decision del usuario:
+  "cada py que lanzamos depende de otro... de esta forma evito dejar sin
+  relanzar por error un py". Cadena nueva (comprobada SOLO al arrancar, no
+  de forma continua): `grabador_libro.py` + `descargar_bit.py --feed`
+  (raiz) -> `monitor_niveles.py`/`monitor_senales.py` (avisan y paran si
+  la raiz no esta) -> `validador_niveles.py`/`marcador_tpsl.py` (avisan y
+  paran si esos dos monitores no estan vivos - confianza en cascada, no
+  re-comprueban la raiz). `grabador_libro.py` se detecta por su lock por
+  moneda (fiable aunque se lance combinado); el resto por `ps -ef` con
+  coin+tf como token suelto (fiable porque esos procesos son siempre un
+  coin+tf por proceso, nunca combinados). Incidente real durante el
+  rollout: los `.lock` de `grabador_libro.py` (5 bytes, solo el PID) se
+  borraron a mano en una limpieza sin darse cuenta de que ya eran estado
+  vivo para esta cascada - los procesos seguian corriendo bien, pero la
+  comprobacion decia que no. Arreglo sin reiniciar nada: reescribir el PID
+  a mano en el `.lock`.
+
+- 2026-08-12: Tercera moneda (ICP) añadida - solo como grabador_libro.py al
+  principio, feed/monitores/validador/marcador añadidos despues para probar
+  el comportamiento con una moneda "pequeña". BTC se deja deliberadamente
+  SOLO con `grabador_libro.py` (sin feed, sin monitores) - grabando por si
+  acaso, sin vigilancia activa por ahora, decision explicita del usuario.
+
+- 2026-08-12: `grabador_libro.py` - lock por moneda
+  (`grabador_libro_<COIN>.lock`, antes uno global para todo el proceso) -
+  permite `grabador_libro.py btc`/`eth`/`icp` como procesos independientes
+  de verdad, en vez de forzar el proceso combinado `btc,eth`. Bug de
+  cabecera encontrado al crear `flujo_ICP.csv` desde cero por primera vez:
+  `_ultimo_cvd()`/`_ultima_fila_coin()` (mismo patron en las dos) leian la
+  PROPIA CABECERA del CSV como si fuera una fila de datos cuando el
+  fichero solo tenia esa linea (heuristica vieja de "descarta la primera
+  linea SOLO si hay mas de una" fallaba con fichero recien creado) -
+  `ValueError: could not convert string to float: 'cvd'`. Doble fix:
+  comparar la primera linea contra la cabecera literal en vez de contar
+  lineas, Y hacer `.rstrip("\r")` (csv.writer termina cada fila en `\r\n`
+  pese a `newline=""` al abrir, lo que rompia esa comparacion la primera
+  vez que se intento el fix).
+
+- 2026-08-12: Unificacion de nombres de fichero (`avisos_[coin]_[tf].csv`,
+  `senales_[coin]_[tf].csv`, `flujo_[coin].csv` sin tf, `[accion]_[coin]_
+  [tf].csv`), todos SIN fecha en el nombre - necesario para que la
+  continuidad de CVD entre reinicios (`_ultimo_cvd()`) funcione (un nombre
+  con fecha abre un fichero nuevo en cada reinicio, sin nada que leer).
+  Columna `pid` (`os.getpid()`) añadida a TODOS los CSV en vivo del
+  proyecto, para deteccion directa de escritores duplicados sin tener que
+  investigar a mano - motivada por los incidentes de corrupcion de CVD de
+  abajo. `grabador_libro.py` pasa de un `flujo_<MONEDA1-MONEDA2>.csv`
+  compartido a un `flujo_<COIN>.csv` por moneda. Nueva herramienta
+  `verificar_flujo.py`: audita consistencia de CVD (`cvd[i] ==
+  cvd[i-1]+delta_vol[i]`) y multiples PID escribiendo el mismo fichero,
+  fusionando incidentes separados por <5min (escritores duplicados
+  entrelazados a veces producen transiciones consistentes por casualidad
+  que fragmentarian un incidente real en docenas de falsos positivos
+  pequeños).
+
+- 2026-08-11/12: Dos incidentes reales de corrupcion de CVD por escritores
+  duplicados de `grabador_libro.py`, ambos con la misma causa raiz: `ps w`
+  (sin `-e`/`-a`) solo lista procesos de la sesion/terminal ACTUAL, oculta
+  procesos huerfanos/demonizados de OTRA sesion (`PPID=1`, sin TTY,
+  visibles solo con `ps -ef`). Incidente 1: dos huerfanos desde el
+  2026-08-07 nunca murieron del todo, invisibles a `ps w`, corrompiendo CVD
+  durante horas. Incidente 2: el propio chequeo de auto-arranque de los
+  monitores (`_proceso_corriendo`, entonces basado en `ps w`) daba un falso
+  "no esta corriendo" y disparo el mismo bug otra vez. Fix: `ps -ef` en
+  todos los sitios donde antes se usaba `ps w`, mas un lock de instancia
+  unica en `grabador_libro.py` (con guardia de huerfano por PID) que hasta
+  entonces no existia. Regla para cualquier sesion futura en este proyecto:
+  nunca `ps w` a secas para comprobar procesos daemonizados en este NAS.
+
+- 2026-08-11: Arquitectura separada en procesos de una sola obligacion
+  ("un .py, una obligacion" - mismo motivo que ya justifico separar
+  `grabador_libro.py` de `monitor.py` en su dia): `grabador_libro.py`
+  (SOLO libro/OI/funding/trades/CVD, dato irreconstruible),
+  `descargar_bit.py --feed` (SOLO velas, si tienen historico en el
+  exchange), `monitor_niveles.py` (SOLO toques de nivel),
+  `monitor_senales.py` (SOLO señales de vela, separado de niveles ese
+  mismo dia - nunca hubo una version separada previa, se extrajo del
+  commit `7a11670` que las tenia fusionadas), `monitor_telegram.py` (SOLO
+  notificar, sacado de `monitor_senales.py`), `monitor_comun.py`
+  (funciones compartidas). `DIAS_OBJETIVO` de `descargar_bit.py` fue
+  primero `VELAS_OBJETIVO=500` (velas planas, intuicion de que un nivel de
+  hace 90 dias en TF fino ya es irrelevante) pero se revirtio el mismo dia
+  tras re-validar el backtest a esa profundidad real: el edge de
+  `REFINADAS_CONFIRMADAS` SI se rompia de verdad con la ventana corta - la
+  intuicion no se sostuvo con datos.
+
 - 2026-08-10: Rama `senales-vela` creada, bifurcada de `4524945` (el commit
   "solo herramientas/mercado", antes de que existiera `monitor.py`
   multi-posicion). Decision del usuario tras confirmar que en 2 semanas

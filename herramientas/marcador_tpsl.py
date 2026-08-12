@@ -96,16 +96,21 @@ def _refrescar_tolerancia(coin, tf, k, tolerancia_atr, toques_min, desde_dias, c
     return r["tolerancia"]
 
 
-def _imprimir_marcador(stats):
+def _texto_marcador(stats):
+    """Texto de la tabla WIN/LOSS/TIMEOUT, o "" si no hay datos - devuelve
+    texto en vez de imprimir (2026-08-12) para que telegram_control.py
+    pueda mandarlo tal cual, mismo motivo que _texto_confirmaciones en
+    validador_niveles.py."""
     if not stats:
-        return
-    print(f"\n{'señal':<28}{'WIN':>6}{'LOSS':>6}{'TIMEOUT':>9}{'win rate%':>12}")
+        return ""
+    lineas = [f"{'señal':<28}{'WIN':>6}{'LOSS':>6}{'TIMEOUT':>9}{'win rate%':>12}"]
     for nombre in sorted(stats):
         s = stats[nombre]
         resueltas = s["WIN"] + s["LOSS"]
         wr = (s["WIN"] / resueltas * 100) if resueltas else None
-        print(f"{nombre:<28}{s['WIN']:>6}{s['LOSS']:>6}{s['TIMEOUT']:>9}"
-              + (f"{wr:>11.1f}%" if wr is not None else f"{'--':>12}"))
+        lineas.append(f"{nombre:<28}{s['WIN']:>6}{s['LOSS']:>6}{s['TIMEOUT']:>9}"
+                      + (f"{wr:>11.1f}%" if wr is not None else f"{'--':>12}"))
+    return "\n".join(lineas)
 
 
 def _resolver(p, ts, precio, resultado, stats, writer, log):
@@ -125,11 +130,13 @@ def _resolver(p, ts, precio, resultado, stats, writer, log):
 
 
 def _consultar(coin, tf):
+    """Texto del marcador acumulado de 'coin'/'tf' - usado tanto por
+    --consultar (se imprime tal cual) como por telegram_control.py (se
+    manda tal cual)."""
     ruta = os.path.join(DIR_LIBRO, f"tpsl_{coin.upper()}_{tf}.csv")
     if not os.path.exists(ruta):
-        print(f"No hay {ruta} todavia - marcador_tpsl.py no ha resuelto ninguna señal "
-              f"para {coin.upper()} {tf} (¿esta corriendo el proceso en vivo?).")
-        return
+        return (f"No hay {ruta} todavia - marcador_tpsl.py no ha resuelto ninguna señal "
+                f"para {coin.upper()} {tf} (¿esta corriendo el proceso en vivo?).")
     stats = {}
     with open(ruta, newline="") as f:
         for fila in csv.DictReader(f):
@@ -137,8 +144,9 @@ def _consultar(coin, tf):
             if not nombre or resultado not in ("WIN", "LOSS", "TIMEOUT"):
                 continue
             stats.setdefault(nombre, {"WIN": 0, "LOSS": 0, "TIMEOUT": 0})[resultado] += 1
-    print(f"=== Marcador acumulado {coin.upper()} {tf} ({ruta}) ===")
-    _imprimir_marcador(stats)
+    texto = _texto_marcador(stats)
+    return f"=== Marcador acumulado {coin.upper()} {tf} ===\n{texto}" if texto else \
+        f"Sin operaciones resueltas todavia para {coin.upper()} {tf}."
 
 
 def main():
@@ -147,7 +155,7 @@ def main():
         if len(args) < 3:
             print("Uso: python herramientas/marcador_tpsl.py --consultar <coin> <tf>")
             return
-        _consultar(args[1], args[2])
+        print(_consultar(args[1], args[2]))
         return
     if len(args) < 2:
         print(__doc__)
@@ -307,7 +315,7 @@ def main():
 
             if time.monotonic() - ultimo_resumen >= resumen_cada:
                 print(f"\n[{_fmt_fecha_ahora()} UTC] {len(pendientes)} pendientes")
-                _imprimir_marcador(stats)
+                print(_texto_marcador(stats))
                 ultimo_resumen = time.monotonic()
 
             time.sleep(cada)

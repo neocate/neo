@@ -123,28 +123,33 @@ def _ultima_fila_coin(ruta):
     return None
 
 
-def _proceso_corriendo(fragmentos):
-    """True si hay un proceso vivo cuya linea de comando (ps -ef) contiene
-    TODOS los 'fragmentos' (lista de substrings) - p.ej. ["descargar_bit.py",
-    "--feed"] para distinguir el modo daemon del uso puntual. DSM/busybox no
-    tiene pgrep (ver anotaciones.md), se parsea 'ps -ef' a mano.
+def _listar_procesos():
+    """Lineas de 'ps -ef' (todos los procesos del sistema), o [] si falla.
 
-    OJO: tiene que ser 'ps -ef' (todos los procesos del sistema), NUNCA
-    'ps w' a secas - 'ps w' solo lista los procesos de la sesion/terminal
-    ACTUAL, y grabador_libro.py/descargar_bit.py --feed corren siempre
-    demonizados desde OTRA sesion SSH (PPID=1, sin TTY). Con 'ps w' este
-    chequeo daba un falso "no esta corriendo" y disparaba un segundo
-    grabador_libro.py real (2026-08-12, encontrado via 'ps -ef' - ver
-    memoria del proyecto sobre el incidente de corrupcion de CVD por el
-    mismo motivo, un dia antes, con el propio operador comprobando a
-    mano). Si 'ps' fallara por lo que sea, asume que NO esta corriendo
-    (mejor arrancarlo de mas que quedarse esperando para siempre por un
-    falso negativo)."""
+    OJO: tiene que ser 'ps -ef', NUNCA 'ps w' a secas - 'ps w' solo lista
+    los procesos de la sesion/terminal ACTUAL, y grabador_libro.py/
+    descargar_bit.py --feed corren siempre demonizados desde OTRA sesion
+    SSH (PPID=1, sin TTY). Con 'ps w' este chequeo daba un falso "no esta
+    corriendo" y disparaba un segundo grabador_libro.py real (2026-08-12,
+    encontrado via 'ps -ef' - ver memoria del proyecto sobre el incidente
+    de corrupcion de CVD por el mismo motivo, un dia antes, con el propio
+    operador comprobando a mano)."""
     try:
         salida = subprocess.run(["ps", "-ef"], capture_output=True, text=True, timeout=5).stdout
     except Exception:
-        return False
-    return any(all(frag in linea for frag in fragmentos) for linea in salida.splitlines())
+        return []
+    return salida.splitlines()
+
+
+def _proceso_corriendo(fragmentos):
+    """True si hay un proceso vivo cuya linea de comando contiene TODOS
+    los 'fragmentos' (lista de substrings) - p.ej. ["descargar_bit.py",
+    "--feed"] para distinguir el modo daemon del uso puntual. DSM/busybox
+    no tiene pgrep (ver anotaciones.md), se parsea 'ps -ef' a mano (ver
+    _listar_procesos). Si 'ps' fallara por lo que sea, asume que NO esta
+    corriendo (mejor avisar de mas que quedarse esperando para siempre por
+    un falso negativo)."""
+    return any(all(frag in linea for frag in fragmentos) for linea in _listar_procesos())
 
 
 # 2026-08-12: cambio de filosofia - ANTES estos monitores auto-arrancaban
