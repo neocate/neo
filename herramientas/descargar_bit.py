@@ -26,8 +26,8 @@
 #                                      desde 'desde' (o todo el historico).
 #                                      Uso manual/puntual.
 #   actualizar(coin, tf)            - si no hay fichero previo, baja
-#                                      exactamente 'velas_objetivo' velas (no
-#                                      de mas); si ya existe, lee la ultima
+#                                      exactamente las velas de 'dias_objetivo'
+#                                      dias (no de mas); si ya existe, lee la ultima
 #                                      vela guardada y solo pide/AÑADE lo que
 #                                      falta (append, sin reescribir), y
 #                                      recorta el fichero si se pasa del cap
@@ -45,13 +45,17 @@
 #                                      resto de modulos (niveles_soporte.py,
 #                                      monitor_niveles.py) son lectores puros.
 #
-# El cap de velas guardadas (VELAS_OBJETIVO, un solo numero para todos los
-# TF) no es un limite de memoria (el CSV mas grande no pasa de unos pocos MB)
-# sino de relevancia: niveles_soporte.py es quien mas velas de contexto
-# necesita, y un numero fijo de VELAS (no de dias) escala solo por TF sin
-# tabla ni formula - en 1m son unas pocas horas, en 4h son semanas. Guardar
-# "90 dias" fijos no tiene sentido en TF finos (un nivel de hace 90 dias en
-# 1m ya esta roto o irrelevante - ver anotaciones.md).
+# El cap de velas guardadas se calcula por DIAS_OBJETIVO (90 dias, igual
+# para todos los TF), no por un numero fijo de velas. Se probo lo contrario
+# primero (VELAS_OBJETIVO=500 velas flat, "un nivel de hace 90 dias en 1m
+# ya esta roto o irrelevante") y se revirtio el 2026-08-11: al re-validar
+# el backtest de senales.REFINADAS_CONFIRMADAS con la profundidad real que
+# eso daba en vivo (~21d en 1h, ~5d en 15m en vez de 90), el edge se
+# rompia de verdad (ruptura_baja_en_soporte pasaba a negativo en 15m) -
+# ver mirar.md. Los 90 dias SI hacen falta, la intuicion de "irrelevante
+# en TF finos" no se sostuvo con datos. max() contra senales.VENTANA_MAXIMA
+# por si 90 dias dieran menos velas que eso (le pasa a 1d: 90 dias = 90
+# velas, menos que las 500 que pediria un --tf-macro 1d).
 #
 # Uso:
 #   python descargar_bit.py <coin> <timeframe> [desde]
@@ -61,7 +65,7 @@
 #                 Si se omite, baja TODO el histórico disponible (bastante
 #                 menos profundo que Binance).
 #   python descargar_bit.py --feed [coin[,coin2,...]] [--tfs 1m,5m,15m,30m,1h,4h,1d]
-#                            [--velas-objetivo 500] [--cada 60]
+#                            [--dias-objetivo 90] [--cada 60]
 #
 # Ejemplos:
 #   python descargar_bit.py btc 5m 1
@@ -70,6 +74,7 @@
 # ---------------------------------------------------------------
 
 import csv
+import math
 import os
 import sys
 import time
@@ -78,13 +83,15 @@ from datetime import datetime, timezone
 
 import ccxt
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from mercado.senales import VENTANA_MAXIMA
+
 DIR_LIBRO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libro")
 
-VELAS_OBJETIVO = 500  # niveles_soporte.py es el consumidor mas exigente;
-                       # cubriendolo, senales.VENTANA_MAXIMA (tambien 500)
-                       # queda cubierto igual - ver cabecera de este fichero.
+DIAS_OBJETIVO = 90.0  # confirmado por backtest (2026-08-11, ver mirar.md) -
+                       # menos dias rompe el edge de REFINADAS_CONFIRMADAS.
 
-TIMEFRAMES_FEED = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
+TIMEFRAMES_FEED = ["1m","3m","5m", "15m", "30m", "1h", "4h", "1d"]
 
 
 def _simbolo(coin):
@@ -136,6 +143,14 @@ def _ultimo_timestamp_ms(ruta):
 def _segundos_tf(timeframe):
     mult = {"m": 60, "h": 3600, "d": 86400}
     return int(timeframe[:-1]) * mult[timeframe[-1]]
+
+
+def _velas_objetivo(timeframe, dias=DIAS_OBJETIVO):
+    """Nº de velas para cubrir 'dias' de historico en este TF - escala solo
+    (mas velas en TF finos, menos en TF gruesos) para llegar siempre a la
+    MISMA profundidad en tiempo, no a un nº de velas fijo (ver cabecera)."""
+    por_dias = math.ceil(dias * 86400 / _segundos_tf(timeframe))
+    return max(por_dias, VENTANA_MAXIMA)
 
 
 def _recortar_si_hace_falta(ruta, cap, margen=0.10):
@@ -252,13 +267,14 @@ def descargar(coin, timeframe, desde=None, limite_req=200):
     return nombre
 
 
-def actualizar(coin, timeframe, velas_objetivo=VELAS_OBJETIVO, limite_req=200):
-    """Si NO hay fichero previo para esta coin/tf: descarga exactamente
-    'velas_objetivo' velas (calculado directamente por tiempo, sin bajar de
-    mas para luego recortar). Si YA existe: lee la ultima vela guardada y
-    solo pide/AÑADE lo que falta, sin reescribir el fichero entero. En
-    ambos casos, al final recorta el fichero a 'velas_objetivo' si se pasa
+def actualizar(coin, timeframe, dias_objetivo=DIAS_OBJETIVO, limite_req=200):
+    """Si NO hay fichero previo para esta coin/tf: descarga exactamente las
+    velas necesarias para cubrir 'dias_objetivo' (calculado directamente
+    por tiempo, sin bajar de mas para luego recortar). Si YA existe: lee la
+    ultima vela guardada y solo pide/AÑADE lo que falta, sin reescribir el
+    fichero entero. En ambos casos, al final recorta el fichero si se pasa
     del cap por margen de holgura (ver _recortar_si_hace_falta)."""
+    velas_objetivo = _velas_objetivo(timeframe, dias_objetivo)
     cliente = ccxt.bitget({'enableRateLimit': True})
     simbolo = _simbolo(coin)
     ruta = _archivo(coin, timeframe)
@@ -292,21 +308,21 @@ def actualizar(coin, timeframe, velas_objetivo=VELAS_OBJETIVO, limite_req=200):
     return ruta
 
 
-def _feed(coins, tfs, velas_objetivo, cada):
-    """Modo daemon: mantiene al dia (y acotado a 'velas_objetivo') el
+def _feed(coins, tfs, dias_objetivo, cada):
+    """Modo daemon: mantiene al dia (y acotado a 'dias_objetivo' dias) el
     historico de cada coin/tf, sin parar, con lock para no pisarse con una
     ejecucion manual concurrente (ver _con_lock). Un fallo puntual de una
     coin/tf (red, símbolo) no debe tumbar el proceso - se avisa y se sigue
     con el resto, misma filosofia de resiliencia que grabador_libro.py."""
     print(f"Feed de velas Bitget: {', '.join(coins)} / {', '.join(tfs)} "
-          f"(velas_objetivo={velas_objetivo:.0f}, cada={cada:.0f}s). Ctrl+C para parar.")
+          f"(dias_objetivo={dias_objetivo:.0f}, cada={cada:.0f}s). Ctrl+C para parar.")
     try:
         while True:
             for coin in coins:
                 for tf in tfs:
                     try:
                         with _con_lock(_archivo(coin, tf)):
-                            actualizar(coin, tf, velas_objetivo=velas_objetivo)
+                            actualizar(coin, tf, dias_objetivo=dias_objetivo)
                     except Exception as e:
                         print(f"  (aviso) {coin} {tf}: {e}")
             time.sleep(cada)
@@ -324,18 +340,18 @@ def main():
         else:
             coins = ["BTC", "ETH"]
         tfs = TIMEFRAMES_FEED
-        velas_objetivo = VELAS_OBJETIVO
+        dias_objetivo = DIAS_OBJETIVO
         cada = 60.0
         i = 0
         while i < len(args):
             if args[i] == "--tfs":
                 i += 1; tfs = [t.strip() for t in args[i].split(",")]
-            elif args[i] == "--velas-objetivo":
-                i += 1; velas_objetivo = float(args[i])
+            elif args[i] == "--dias-objetivo":
+                i += 1; dias_objetivo = float(args[i])
             elif args[i] == "--cada":
                 i += 1; cada = float(args[i])
             i += 1
-        _feed(coins, tfs, velas_objetivo, cada)
+        _feed(coins, tfs, dias_objetivo, cada)
         return
 
     if len(sys.argv) < 3:
@@ -348,7 +364,7 @@ def main():
         print("  python descargar_bit.py eth 15m 2023-01-01")
         print("\nModo daemon (siempre corriendo, ver cabecera del fichero):")
         print("  python descargar_bit.py --feed [coin[,coin2,...]] [--tfs 1m,5m,15m,30m,1h,4h,1d]")
-        print("                           [--velas-objetivo 500] [--cada 60]")
+        print("                           [--dias-objetivo 90] [--cada 60]")
         return
     coin = sys.argv[1]
     timeframe = sys.argv[2]

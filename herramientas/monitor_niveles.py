@@ -12,7 +12,7 @@
 # con frecuencia, vigilar niveles es mecanico y estable - no tiene sentido
 # que un ajuste de señales obligue a reiniciar (y cortar la serie de) el
 # vigilante de niveles. Las funciones que ambos comparten (leer el flujo en
-# vivo, esperar/arrancar sus dependencias) viven en monitor_comun.py.
+# vivo, comprobar sus dependencias) viven en monitor_comun.py.
 #
 # Los niveles son una FOTO tomada al arrancar (via _analizar() de
 # niveles_soporte.py, sobre el historico ya descargado) - este proceso no
@@ -20,11 +20,13 @@
 # cortar (Ctrl+C), volver a bajarlo/correr niveles_soporte.py, y reiniciar.
 #
 # Lee (tail) el CSV que escribe grabador_libro.py - NO pide nada a la API
-# por su cuenta salvo para ARRANCAR sus dependencias si detecta que no
-# estan corriendo (ver monitor_comun._asegurar_grabador_libro/
-# _esperar_historico) - grabador_libro.py (libro/OI/funding/CVD) y
-# descargar_bit.py --feed (velas) son procesos independientes que deben
-# seguir vivos aunque este monitor se reinicie.
+# por su cuenta, y YA NO arranca sus dependencias si faltan (2026-08-11
+# a 2026-08-12: cambio de filosofia, ver monitor_comun.py) - si
+# grabador_libro.py (libro/OI/funding/CVD) o descargar_bit.py --feed
+# (velas) no estan corriendo para esta moneda, avisa y para la ejecucion
+# en vez de arrancarlos el mismo - Fran, tras liarse relanzando procesos en
+# cascada y dejarse alguno sin relanzar: "de esta forma evito dejar sin
+# relanzar por error un py". Hay que lanzarlos a mano primero.
 #
 # Localiza el archivo mas reciente en herramientas/libro/flujo_*.csv que
 # incluya la moneda pedida (ver monitor_comun._localizar_csv_libro). Al
@@ -44,7 +46,8 @@
 # vigilan tambien, marcados [macro] en los avisos.
 #
 # Avisos: por consola en vivo, Y a un CSV en herramientas/libro/
-# (avisos_<fecha>_<coin>_<tf>.csv) - timestamp, evento, nivel, precio,
+# (avisos_<coin>_<tf>.csv, SIN fecha - un reinicio sigue el mismo fichero,
+# igual que flujo_<coin>.csv) - timestamp, evento, nivel, precio,
 # imbalance, cvd en ese momento, para revisar despues o cruzar con el resto.
 #
 # Uso:
@@ -62,9 +65,10 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from herramientas.niveles_soporte import _analizar
+from herramientas.descargar_bit import _archivo as _archivo_bitget
 from herramientas.monitor_comun import (
     DIR_LIBRO, CAMPOS_AVISOS, _flt, _localizar_csv_libro, _tail_csv,
-    _ultima_fila_coin, _esperar_historico, _asegurar_grabador_libro,
+    _ultima_fila_coin, _requerir_grabador_libro, _requerir_feed_velas,
 )
 
 
@@ -142,8 +146,22 @@ def main():
         print("(sin defaults a proposito - ver cabecera de niveles_soporte.py)")
         return
 
+    # 2026-08-12: ya NO se auto-arranca nada si falta una dependencia -
+    # aviso y parar, ver cabecera de monitor_comun.py (cadena en cascada
+    # pedida por Fran para no dejarse un proceso sin relanzar por error).
+    if not _requerir_grabador_libro(coin):
+        print(f"ERROR: grabador_libro.py no esta corriendo para {coin.upper()} - "
+              f"lanzalo primero (python herramientas/grabador_libro.py {coin.lower()}) y reintenta.")
+        return
+    if not _requerir_feed_velas():
+        print("ERROR: descargar_bit.py --feed no esta corriendo - lanzalo primero y reintenta.")
+        return
     tfs_necesarios = {tf} | ({tf_macro} if tf_macro else set())
-    _esperar_historico(coin, tfs_necesarios, cada)
+    faltan = [t for t in tfs_necesarios if not os.path.exists(_archivo_bitget(coin, t))]
+    if faltan:
+        print(f"ERROR: falta el historico de {coin.upper()} {', '.join(faltan)} todavia "
+              f"(¿acaba de arrancar el feed? espera a que termine la primera descarga y reintenta).")
+        return
 
     watch, r = _armar_watchlist(coin, tf, k, tolerancia_atr, toques_min, desde_dias,
                                  confirmacion_velas, tf_macro)
@@ -152,8 +170,7 @@ def main():
         return
 
     os.makedirs(DIR_LIBRO, exist_ok=True)
-    fecha = datetime.now(timezone.utc).strftime("%Y%m%d")
-    ruta_log = os.path.join(DIR_LIBRO, f"avisos_{fecha}_{coin.upper()}_{tf}.csv")
+    ruta_log = os.path.join(DIR_LIBRO, f"avisos_{coin.upper()}_{tf}.csv")
     nuevo = not os.path.exists(ruta_log)
     log = open(ruta_log, "a", newline="")
     writer = csv.DictWriter(log, fieldnames=CAMPOS_AVISOS)
@@ -169,13 +186,11 @@ def main():
         print(f"  {niv['tipo']:<6} {niv['precio']:>12.4f}  tolerancia {niv['tolerancia']:.4f} {etiqueta}")
     print(f"Log de avisos -> {ruta_log}")
 
-    _asegurar_grabador_libro()
     ruta_libro = _localizar_csv_libro(coin)
-    while ruta_libro is None:
-        print(f"Esperando a que grabador_libro.py genere el CSV de {coin.upper()} en "
-              f"{DIR_LIBRO}... Reintento cada {cada:.0f}s...")
-        time.sleep(cada)
-        ruta_libro = _localizar_csv_libro(coin)
+    if ruta_libro is None:
+        print(f"ERROR: grabador_libro.py esta vivo pero no se encuentra su CSV de {coin.upper()} "
+              f"en {DIR_LIBRO} todavia (¿acaba de arrancar? reintenta en unos segundos).")
+        return
     print(f"Leyendo de {ruta_libro} (solo lineas nuevas desde ahora).")
 
     offset = os.path.getsize(ruta_libro)
@@ -189,7 +204,7 @@ def main():
     # en None y todos los niveles en tocando=False aunque el precio YA
     # estuviera dentro de la tolerancia de alguno, hasta que llegue el
     # primer tick nuevo.
-    fila_inicial = _ultima_fila_coin(ruta_libro, coin)
+    fila_inicial = _ultima_fila_coin(ruta_libro)
     if fila_inicial:
         precio_inicial = _flt(fila_inicial.get("mid"))
         if precio_inicial is None:
@@ -213,9 +228,6 @@ def main():
         while True:
             filas, offset = _tail_csv(ruta_libro, offset)
             for fila in filas:
-                if fila.get("coin") != coin.upper():
-                    continue
-
                 precio_actual = _flt(fila.get("mid"))
                 if precio_actual is None:
                     bid, ask = _flt(fila.get("bid")), _flt(fila.get("ask"))
@@ -270,6 +282,7 @@ def main():
                         "precio_actual": precio_actual,
                         "imbalance": round(ultimo_imbalance, 4) if ultimo_imbalance is not None else "",
                         "cvd": round(ultimo_cvd, 4) if ultimo_cvd is not None else "",
+                        "pid": os.getpid(),
                     })
                     log.flush()
 

@@ -8,7 +8,7 @@
 # reves).
 #
 # Proceso UNICO y GLOBAL, sin coin/tf: descubre TODOS los
-# herramientas/libro/senales_<fecha>_<COIN>_<TF>.csv que haya (los escribe
+# herramientas/libro/senales_<COIN>_<TF>.csv que haya (los escribe
 # monitor_senales.py, uno por cada instancia que tengas corriendo) y los
 # sigue en vivo, re-escaneando el directorio cada vuelta para engancharse
 # tambien a los que aparezcan despues (si lanzas mas monitor_senales.py mas
@@ -21,17 +21,17 @@
 # monitor_senales.py con flujo_*.csv).
 #
 # De cada fila con evento="senal", solo manda Telegram si su 'tipo' esta en
-# mercado.senales.REFINADAS_CONFIRMADAS - monitor_senales.py ya descarta
-# REFINADAS_EN_PRUEBAS al escribir el CSV, pero SI puede loguear señales
-# fuera del Grupo A (no tocadas por el filtro de contexto), que tampoco son
-# para Telegram.
+# mercado.senales.REFINADAS_CONFIRMADAS - monitor_senales.py loguea TODO lo
+# que detecta (las 4 CONFIRMADAS, las 3 EN_PRUEBAS -desde 2026-08-12, para
+# que fjsl.py pueda seguir midiendolas- y lo que quede fuera del Grupo A),
+# este filtro es el UNICO punto que decide que de eso se manda de verdad.
 #
 # Via alertas.avisos.enviar(). Sin TELEGRAM_TOKEN/TELEGRAM_CHAT_ID en .env,
 # enviar() no hace nada - no hace falta configurarlo para que el resto del
 # proyecto funcione.
 #
 # Uso:
-#   python herramientas/monitor_telegram.py [--cada 15]
+#   python herramientas/monitor_telegram.py [--cada 15] [--latido-cada 1800]
 # ---------------------------------------------------------------
 
 import os
@@ -44,7 +44,7 @@ from herramientas.monitor_comun import DIR_LIBRO, CAMPOS_AVISOS, _tail_csv
 from mercado import senales
 from alertas import avisos
 
-_PATRON = re.compile(r"^senales_\d+_([A-Z0-9]+)_(.+)\.csv$")
+_PATRON = re.compile(r"^senales_(?:\d+_)?([A-Z0-9]+)_(.+)\.csv$")
 
 
 def _localizar_senales_csv():
@@ -62,20 +62,29 @@ def _localizar_senales_csv():
 def main():
     args = sys.argv[1:]
     cada = 15.0
+    latido_cada = 1800.0
     i = 0
     while i < len(args):
         if args[i] == "--cada":
             i += 1; cada = float(args[i])
+        elif args[i] == "--latido-cada":
+            i += 1; latido_cada = float(args[i])
         i += 1
 
     print(f"Vigilando Telegram de todos los senales_*.csv en {DIR_LIBRO} (cada {cada:.0f}s).")
-    print("Sin TELEGRAM_TOKEN/TELEGRAM_CHAT_ID en .env, no manda nada (ver alertas/avisos.py).")
+    if avisos.configurado():
+        print("Telegram configurado (TOKEN/CHAT_ID presentes en .env) - las señales SI se mandan.")
+    else:
+        print("Telegram NO configurado (falta TOKEN/CHAT_ID en .env) - no se manda nada, ver alertas/avisos.py.")
+    print(f"Latido cada {latido_cada:.0f}s (para saber que sigue vivo aunque no haya señales).")
     print("Ctrl+C para parar.\n")
 
     offsets = {}
+    ultimo_latido = time.monotonic()
     try:
         while True:
-            for ruta, coin, tf in _localizar_senales_csv():
+            ficheros = _localizar_senales_csv()
+            for ruta, coin, tf in ficheros:
                 if ruta not in offsets:
                     offsets[ruta] = os.path.getsize(ruta)
                     print(f"Nuevo fichero detectado: {ruta} (leyendo solo desde ahora)")
@@ -91,6 +100,14 @@ def main():
                     fecha = fila.get("fecha_utc", "")
                     print(f"  >>> TELEGRAM {coin} {tf}  {nombre}  cierre {precio}  ({fecha} UTC)")
                     avisos.enviar(f"{coin} {tf}  {nombre}\ncierre {precio}  ({fecha} UTC)")
+
+            # Latido periodico: sin esto, el log se queda mudo entre señales
+            # (pueden pasar horas) y no hay forma de distinguir "vivo, sin
+            # novedades" de "colgado" solo mirando el fichero de log.
+            if time.monotonic() - ultimo_latido >= latido_cada:
+                ultimo_latido = time.monotonic()
+                objetivos = ", ".join(f"{coin} {tf}" for _, coin, tf in ficheros) or "ninguno todavia"
+                print(f"[latido] vivo - vigilando: {objetivos}")
 
             time.sleep(cada)
     except KeyboardInterrupt:

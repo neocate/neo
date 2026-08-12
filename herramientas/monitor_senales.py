@@ -19,11 +19,15 @@
 # _analizar(coin, tf, ...) directo de niveles_soporte.py.
 #
 # De las 7 señales que mercado/senales.NIVEL_UTIL_GRUPO_A puede renombrar/
-# filtrar segun el contexto de nivel, solo las 4 de
-# senales.REFINADAS_CONFIRMADAS (edge positivo y consistente en el backtest
-# BTC+ETH 2018-2022) se acaban logueando aqui; las 3 de
-# REFINADAS_EN_PRUEBAS se descartan (no confirmadas todavia). El resto de
-# señales (fuera del Grupo A) no se ven afectadas por esto.
+# filtrar segun el contexto de nivel, aqui se loguean las 7 (las 4 de
+# REFINADAS_CONFIRMADAS y las 3 de REFINADAS_EN_PRUEBAS) - hasta 2026-08-12
+# las EN_PRUEBAS se descartaban aqui mismo, pero eso les impedia llegar a
+# validador_niveles.py (que las tailea de este CSV para seguir midiendo si
+# ganan o pierden edge con mas datos - no tiene sentido "en pruebas" si
+# nadie las mide). No afecta a Telegram: monitor_telegram.py tiene su
+# PROPIO filtro a REFINADAS_CONFIRMADAS antes de enviar, independiente de
+# lo que se logue aqui. El resto de señales (fuera del Grupo A) no se ven
+# afectadas por ninguno de los dos filtros.
 #
 # Solo detecta y loguea - NO manda Telegram (2026-08-11, sacado de aqui a
 # proposito): eso es responsabilidad de monitor_telegram.py, un proceso
@@ -34,12 +38,14 @@
 # Lee (tail) el CSV de grabador_libro.py solo para el imbalance/cvd de
 # contexto que se loguea junto a cada señal - el precio/las velas salen de
 # herramientas/libro/historico_<COIN>_<TF>_bitget.csv, que mantiene
-# descargar_bit.py --feed (proceso independiente). Si ninguno de los dos
-# esta corriendo, este monitor los arranca el (ver monitor_comun.py).
+# descargar_bit.py --feed (proceso independiente). YA NO se auto-arrancan
+# si faltan (2026-08-12, ver monitor_comun.py) - avisa y para la ejecucion,
+# hay que lanzarlos a mano primero.
 #
 # Avisos: por consola en vivo, Y a un CSV PROPIO en herramientas/libro/
-# (senales_<fecha>_<coin>_<tf>.csv, distinto del avisos_*.csv de
-# monitor_niveles.py - dos escritores en el mismo fichero es justo lo que
+# (senales_<coin>_<tf>.csv, SIN fecha - un reinicio sigue el mismo fichero;
+# distinto del avisos_*.csv de monitor_niveles.py - dos escritores en el
+# mismo fichero es justo lo que
 # se queria evitar al separar).
 #
 # Uso:
@@ -60,7 +66,7 @@ from herramientas.niveles_soporte import _analizar
 from herramientas.descargar_bit import _archivo as _archivo_bitget
 from herramientas.monitor_comun import (
     DIR_LIBRO, CAMPOS_AVISOS, _flt, _localizar_csv_libro, _tail_csv,
-    _ultima_fila_coin, _esperar_historico, _asegurar_grabador_libro,
+    _ultima_fila_coin, _requerir_grabador_libro, _requerir_feed_velas,
 )
 from mercado import senales
 
@@ -132,7 +138,19 @@ def main():
         print("(sin defaults a proposito - ver cabecera de niveles_soporte.py)")
         return
 
-    _esperar_historico(coin, {tf}, cada)
+    # 2026-08-12: ya NO se auto-arranca nada si falta una dependencia -
+    # aviso y parar, ver cabecera de monitor_comun.py.
+    if not _requerir_grabador_libro(coin):
+        print(f"ERROR: grabador_libro.py no esta corriendo para {coin.upper()} - "
+              f"lanzalo primero (python herramientas/grabador_libro.py {coin.lower()}) y reintenta.")
+        return
+    if not _requerir_feed_velas():
+        print("ERROR: descargar_bit.py --feed no esta corriendo - lanzalo primero y reintenta.")
+        return
+    if not os.path.exists(_archivo_bitget(coin, tf)):
+        print(f"ERROR: falta el historico de {coin.upper()} {tf} todavia "
+              f"(¿acaba de arrancar el feed? espera a que termine la primera descarga y reintenta).")
+        return
 
     # Sin --tf-macro a proposito (ver cabecera) - mismo criterio que valida
     # herramientas/backtest_senales.py.
@@ -154,8 +172,7 @@ def main():
     ultimo_ts_vela = velas[-1][0] if velas else None
 
     os.makedirs(DIR_LIBRO, exist_ok=True)
-    fecha = datetime.now(timezone.utc).strftime("%Y%m%d")
-    ruta_log = os.path.join(DIR_LIBRO, f"senales_{fecha}_{coin.upper()}_{tf}.csv")
+    ruta_log = os.path.join(DIR_LIBRO, f"senales_{coin.upper()}_{tf}.csv")
     nuevo = not os.path.exists(ruta_log)
     log = open(ruta_log, "a", newline="")
     writer = csv.DictWriter(log, fieldnames=CAMPOS_AVISOS)
@@ -166,13 +183,11 @@ def main():
     print(f"Señales de vela ({coin.upper()} {tf}) - precio de referencia {r['precio_actual']:.4f}")
     print(f"Log de señales -> {ruta_log}")
 
-    _asegurar_grabador_libro()
     ruta_libro = _localizar_csv_libro(coin)
-    while ruta_libro is None:
-        print(f"Esperando a que grabador_libro.py genere el CSV de {coin.upper()} en "
-              f"{DIR_LIBRO}... Reintento cada {cada:.0f}s...")
-        time.sleep(cada)
-        ruta_libro = _localizar_csv_libro(coin)
+    if ruta_libro is None:
+        print(f"ERROR: grabador_libro.py esta vivo pero no se encuentra su CSV de {coin.upper()} "
+              f"en {DIR_LIBRO} todavia (¿acaba de arrancar? reintenta en unos segundos).")
+        return
     print(f"Leyendo de {ruta_libro} (solo lineas nuevas desde ahora).")
 
     offset = os.path.getsize(ruta_libro)
@@ -181,7 +196,7 @@ def main():
     # Estado inicial desde la ULTIMA fila ya grabada (mismo motivo que
     # monitor_niveles.py: solo evita que imbalance/cvd empiecen en None
     # hasta el primer tick nuevo, no dispara ningun evento por si mismo).
-    fila_inicial = _ultima_fila_coin(ruta_libro, coin)
+    fila_inicial = _ultima_fila_coin(ruta_libro)
     if fila_inicial:
         ultimo_imbalance = _flt(fila_inicial.get("imbalance"))
         ultimo_cvd = _flt(fila_inicial.get("cvd"))
@@ -195,8 +210,6 @@ def main():
         while True:
             filas, offset = _tail_csv(ruta_libro, offset)
             for fila in filas:
-                if fila.get("coin") != coin.upper():
-                    continue
                 imbalance_val = _flt(fila.get("imbalance"))
                 if imbalance_val is not None:
                     ultimo_imbalance = imbalance_val
@@ -213,8 +226,6 @@ def main():
                     activas = senales.detectar(velas, k, niveles_vigentes=niveles_vigentes,
                                                 tolerancia_nivel=tolerancia_nivel)
                     for nombre in activas:
-                        if nombre in senales.REFINADAS_EN_PRUEBAS:
-                            continue
                         fecha_vela = datetime.fromtimestamp(nueva[0] / 1000, timezone.utc)
                         print(f"  >>> SENAL {nombre}  cierre {nueva[4]:.4f}  "
                               f"({fecha_vela:%Y-%m-%d %H:%M} UTC, vela {tf})")
@@ -229,6 +240,7 @@ def main():
                             "precio_actual": nueva[4],
                             "imbalance": round(ultimo_imbalance, 4) if ultimo_imbalance is not None else "",
                             "cvd": round(ultimo_cvd, 4) if ultimo_cvd is not None else "",
+                            "pid": os.getpid(),
                         })
                         log.flush()
 

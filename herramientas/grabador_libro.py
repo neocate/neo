@@ -22,11 +22,11 @@
 # lateral/bajando (o viceversa) es la divergencia clasica que se usa como
 # señal de agotamiento.
 #
-# Al arrancar, si ya existe un fichero de hoy para estas monedas (reinicio
-# del mismo dia, no la primera vez), retoma el CVD desde la ultima fila YA
-# GRABADA de cada moneda en vez de resetear a 0 (ver _ultimo_cvd) - el valor
-# esta ahi precisamente porque se guarda para no perderlo. Solo empieza en 0
-# cuando de verdad no hay nada previo (fichero nuevo). Sigue habiendo un
+# Al arrancar, si ya existe flujo_<COIN>.csv de esa moneda (reinicio, no la
+# primera vez), retoma el CVD desde la ultima fila YA GRABADA en vez de
+# resetear a 0 (ver _ultimo_cvd) - el valor esta ahi precisamente porque se
+# guarda para no perderlo. Solo empieza en 0 cuando de verdad no hay nada
+# previo (fichero nuevo). Sigue habiendo un
 # hueco pequeño e inevitable: los trades ocurridos MIENTRAS el proceso
 # estuvo parado no se cuentan (la primera vuelta tras arrancar solo fija el
 # cursor de trades, no suma nada - ver _trade_flow), pero al menos no hay un
@@ -65,10 +65,20 @@
 #                             [--ls-ratio-cada 300]
 #   coin por defecto: btc,eth
 #
+# El lock es POR MONEDA (2026-08-12, ver _bloquear_instancia_unica), asi
+# que 'grabador_libro.py btc' y 'grabador_libro.py eth' pueden correr como
+# dos procesos independientes de verdad - para tocar/reiniciar solo una
+# moneda sin cortar la otra, sin que el lock del proceso combinado lo
+# impida. El proceso combinado (btc,eth) sigue funcionando igual que
+# siempre; ambos estilos son validos, no hace falta elegir uno para
+# siempre.
+#
 # Ejemplos:
 #   python herramientas/grabador_libro.py
 #   python herramientas/grabador_libro.py btc,eth
 #   python herramientas/grabador_libro.py btc,eth,sol --cada 30
+#   python herramientas/grabador_libro.py btc      (proceso independiente, solo BTC)
+#   python herramientas/grabador_libro.py eth      (proceso independiente, solo ETH)
 # ---------------------------------------------------------------
 
 import csv
@@ -82,27 +92,39 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mercado import datos, flujo
 from herramientas.descargar_bit import DIR_LIBRO
 
+# Sin "coin" (2026-08-12): un fichero por moneda ahora, ya no hace falta
+# distinguir de que moneda es cada fila dentro del propio CSV - lo dice el
+# nombre del fichero (flujo_<COIN>.csv). Antes era flujo_<MONEDA1-MONEDA2>.csv
+# con las dos monedas intercaladas - eso ademas ocultaba que, si algun dia
+# habia un segundo escritor, sus filas se mezclaban con las del bueno sin
+# que se notara facilmente al mirar el CSV (ver el pid mas abajo, y
+# verificar_flujo.py, incidente 2026-08-11/12).
 CAMPOS_CSV = [
-    "timestamp_ms", "fecha_utc", "coin",
+    "timestamp_ms", "fecha_utc",
     "bid", "ask", "spread_bps", "mid", "microprecio",
     "imbalance", "imbalance_niveles",
     "open_interest", "funding_rate_pct", "long_short_ratio",
     "n_trades", "vol_buy", "vol_sell", "delta_vol", "cvd",
     "bids_json", "asks_json",
+    "pid",  # PID del proceso que escribio la fila - si algun dia vuelve a
+            # haber dos escritores del mismo flujo_<COIN>.csv, se ve al
+            # instante en el propio CSV en vez de tener que investigarlo
+            # con un script aparte despues. Filas de antes de este cambio
+            # llevan pid vacio (no se puede saber con certeza
+            # retroactivamente quien escribio cada una).
 ]
 
 
-def _archivo(coins):
-    """flujo_<monedas>.csv en herramientas/libro/ (mismo sitio que los
-    historico_*_bitget.csv que baja descargar_bit.py). SIN fecha en el
-    nombre (2026-08-11, a peticion de Fran): un reinicio debe seguir
-    escribiendo el MISMO fichero para poder retomar el CVD desde la ultima
-    fila ya grabada (ver _ultimo_cvd) en vez de perderlo cada vez que se
-    relanza el proceso. Si cambia el conjunto de monedas, cambia el
-    nombre - no tiene sentido mezclar series de monedas distintas."""
+def _archivo(coin):
+    """flujo_<COIN>.csv en herramientas/libro/ (mismo sitio que los
+    historico_*_bitget.csv que baja descargar_bit.py) - UN fichero POR
+    MONEDA (2026-08-12, antes era un unico flujo_<MONEDA1-MONEDA2>.csv con
+    todas las monedas intercaladas). SIN fecha en el nombre (2026-08-11, a
+    peticion de Fran): un reinicio debe seguir escribiendo el MISMO
+    fichero para poder retomar el CVD desde la ultima fila ya grabada (ver
+    _ultimo_cvd) en vez de perderlo cada vez que se relanza el proceso."""
     os.makedirs(DIR_LIBRO, exist_ok=True)
-    monedas = "-".join(c.upper() for c in coins)
-    return os.path.join(DIR_LIBRO, f"flujo_{monedas}.csv")
+    return os.path.join(DIR_LIBRO, f"flujo_{coin.upper()}.csv")
 
 
 def _ruta_compatible(ruta):
@@ -124,11 +146,68 @@ def _ruta_compatible(ruta):
     return nueva
 
 
-def _ultimo_cvd(ruta, coin):
-    """CVD de la ultima fila ya grabada de 'coin' en 'ruta' - lee solo la
-    cola del fichero (mismo patron que monitor_niveles.py._ultima_fila_coin)
-    en vez de cargarlo entero. None si 'ruta' no existe todavia o no hay
-    ninguna fila de esa moneda (primera vez de verdad, sin reinicio)."""
+def _ruta_lock(coin):
+    return os.path.join(DIR_LIBRO, f"grabador_libro_{coin.upper()}.lock")
+
+
+def _bloquear_instancia_unica(coins):
+    """Evita que dos grabador_libro.py escriban el mismo flujo_<COIN>.csv a
+    la vez - el 2026-08-11 dos huerfanos desde el 7 de agosto (nunca
+    murieron del todo, sin terminal ni sesion asociada, invisibles a 'ps w'
+    - solo 'ps -ef' los vio) corrompieron el CVD durante horas sin que nadie
+    se diera cuenta, porque nada impedia que un segundo (o tercer) proceso
+    escribiera a la vez.
+
+    UN LOCK POR MONEDA (2026-08-12, antes un unico grabador_libro.lock
+    global para todo el proceso sin importar que monedas se le pasaran).
+    Con el lock global, 'grabador_libro.py btc' y 'grabador_libro.py eth'
+    como dos procesos independientes no funcionaba - el segundo se
+    rechazaba por el lock del primero. El intento de separarlos asi de
+    todas formas (2026-08-12, antes de este cambio) dejo un hueco real de
+    ~3.5min sin grabar ETH mientras se resolvia la confusion de cual PID
+    matar (ver memoria del proyecto) - motivo directo de este cambio: ahora
+    cada moneda tiene su propio DIR_LIBRO/grabador_libro_<COIN>.lock, asi
+    que se puede reiniciar/tocar una moneda sola sin parar la otra.
+
+    Si CUALQUIERA de las monedas pedidas ya tiene un lock vivo, se aborta
+    ANTES de tocar ningun fichero (no arranca solo con las que quedan
+    libres) - un arranque parcial silencioso confundiria mas de lo que
+    ayuda. Misma logica de deteccion de huerfanos que antes por cada lock:
+    PID guardado dentro, se comprueba con os.kill(pid,0), se reemplaza si
+    ya no existe (proceso anterior murio sin limpiar, p.ej. kill -9)."""
+    rutas = {}
+    for coin in coins:
+        ruta_lock = _ruta_lock(coin)
+        if os.path.exists(ruta_lock):
+            huerfano = True
+            try:
+                with open(ruta_lock) as f:
+                    pid_viejo = int(f.read().strip())
+                os.kill(pid_viejo, 0)  # no mata - solo comprueba si el PID existe
+                huerfano = False
+            except ProcessLookupError:
+                pass  # el PID de dentro ya no existe - lock huerfano, se pisa
+            except (ValueError, OSError):
+                pass  # lock vacio/corrupto/sin permiso de leer el PID - se pisa
+            if not huerfano:
+                print(f"ERROR: ya hay un grabador_libro.py corriendo para {coin} (PID {pid_viejo}).")
+                print(f"       Si el proceso murio sin limpiar {ruta_lock}, borralo a mano y reintenta.")
+                sys.exit(1)
+            print(f"(aviso) lock huerfano de {coin} (PID {pid_viejo} ya no existe) - lo reemplazo.")
+        rutas[coin] = ruta_lock
+    for ruta_lock in rutas.values():
+        with open(ruta_lock, "w") as f:
+            f.write(str(os.getpid()))
+    return list(rutas.values())
+
+
+def _ultimo_cvd(ruta):
+    """CVD de la ultima fila ya grabada en 'ruta' - lee solo la cola del
+    fichero (mismo patron que monitor_comun._ultima_fila_coin) en vez de
+    cargarlo entero. 'ruta' es un flujo_<COIN>.csv de UNA sola moneda
+    (2026-08-12), ya no hace falta filtrar por coin dentro del fichero.
+    None si 'ruta' no existe todavia (primera vez de verdad, sin reinicio)
+    o no hay ninguna fila valida."""
     if not os.path.exists(ruta):
         return None
     with open(ruta, "rb") as f:
@@ -136,17 +215,30 @@ def _ultimo_cvd(ruta, coin):
         tam = f.tell()
         f.seek(max(0, tam - 262_144))
         cola = f.read()
-    lineas = [l for l in cola.decode("utf-8", errors="replace").split("\n") if l.strip()]
-    if len(lineas) > 1:
-        lineas = lineas[1:]  # descarta posible fila cortada a medias por el propio seek
+    # .rstrip("\r"): csv.writer escribe cada fila terminada en '\r\n' (aun
+    # con newline="" al abrir) - el split por '\n' solo deja un '\r' colgando
+    # al final de cada linea, que rompia la comparacion contra 'cabecera' de
+    # mas abajo (2026-08-12, primer sintoma real de esto).
+    lineas = [l.rstrip("\r") for l in cola.decode("utf-8", errors="replace").split("\n") if l.strip()]
+    # Descarta la cabecera si la cola la capturo entera (fichero recien
+    # creado con writeheader() y todavia sin ninguna fila de datos - se
+    # detecto el 2026-08-12 al arrancar flujo_ICP.csv por primera vez:
+    # ValueError leyendo 'cvd' porque esa fila ERA la cabecera). Si la
+    # primera linea capturada NO es la cabecera literal, es (probablemente)
+    # una fila cortada a medias por el propio seek en un fichero grande -
+    # se descarta igual, salvo que sea la unica linea que hay.
+    cabecera = ",".join(CAMPOS_CSV)
+    if lineas and lineas[0] == cabecera:
+        lineas = lineas[1:]
+    elif len(lineas) > 1:
+        lineas = lineas[1:]
     for linea in reversed(lineas):
         campos = next(csv.reader([linea]))
         if len(campos) != len(CAMPOS_CSV):
             continue
         fila = dict(zip(CAMPOS_CSV, campos))
-        if fila.get("coin") == coin:
-            valor = fila.get("cvd")
-            return float(valor) if valor not in (None, "") else None
+        valor = fila.get("cvd")
+        return float(valor) if valor not in (None, "") else None
     return None
 
 
@@ -277,7 +369,6 @@ def _fila(coin, simbolo, profundidad, funding_cache, funding_cada,
     return {
         "timestamp_ms": int(ahora.timestamp() * 1000),
         "fecha_utc": ahora.strftime("%Y-%m-%d %H:%M:%S"),
-        "coin": coin,
         "bid": bid if bid is not None else "",
         "ask": ask if ask is not None else "",
         "spread_bps": flujo.spread_bps(libro) if libro else "",
@@ -295,6 +386,7 @@ def _fila(coin, simbolo, profundidad, funding_cache, funding_cada,
         "cvd": round(cvd, 6),
         "bids_json": json.dumps(bids) if (grabar_crudo and bids) else "",
         "asks_json": json.dumps(asks) if (grabar_crudo and asks) else "",
+        "pid": os.getpid(),
     }
 
 
@@ -330,17 +422,26 @@ def main():
             ls_ratio_cada = float(args[i])
         i += 1
 
+    rutas_lock = _bloquear_instancia_unica(coins)
+
     simbolos = {c: datos.normalizar_simbolo(c, "f")[0] for c in coins}
-    ruta = _ruta_compatible(_archivo(coins))
-    nuevo = not os.path.exists(ruta)
-    arch = open(ruta, "a", newline="")
-    writer = csv.DictWriter(arch, fieldnames=CAMPOS_CSV)
-    if nuevo:
-        writer.writeheader()
-        arch.flush()
+
+    # Un fichero/escritor por moneda (2026-08-12) - antes era uno compartido
+    # para todas. arch/writer son dicts {coin: ...}.
+    arch = {}
+    writer = {}
+    for coin in coins:
+        ruta = _ruta_compatible(_archivo(coin))
+        nuevo = not os.path.exists(ruta)
+        arch[coin] = open(ruta, "a", newline="")
+        writer[coin] = csv.DictWriter(arch[coin], fieldnames=CAMPOS_CSV)
+        if nuevo:
+            writer[coin].writeheader()
+            arch[coin].flush()
+        print(f"  {coin} -> {ruta}")
 
     print(f"Grabando libro/OI/funding/trades de {', '.join(coins)} cada {cada:.0f}s "
-          f"(profundidad {profundidad}) -> {ruta}")
+          f"(profundidad {profundidad}).")
     print(f"Funding cada {funding_cada:.0f}s. "
           f"Long/short ratio cada {ls_ratio_cada:.0f}s. "
           f"Libro crudo (bids_json/asks_json) cada {libro_crudo_cada:.0f}s.")
@@ -350,12 +451,13 @@ def main():
     ls_ratio_cache = {}
     trade_cache = {}
     for coin in coins:
-        cvd_previo = None if nuevo else _ultimo_cvd(ruta, coin)
+        ruta = _archivo(coin)
+        cvd_previo = _ultimo_cvd(ruta) if os.path.exists(ruta) else None
         if cvd_previo is not None:
             trade_cache[coin] = {"cursor": None, "cvd": cvd_previo, "iniciado": False}
             print(f"  {coin}: CVD retomado en {cvd_previo:+.4f} (fichero existente)")
         else:
-            print(f"  {coin}: CVD arranca en 0 (sin fichero previo de hoy)")
+            print(f"  {coin}: CVD arranca en 0 (sin fichero previo)")
     print("Ctrl+C para parar.")
     try:
         while True:
@@ -363,13 +465,19 @@ def main():
                 fila = _fila(coin, simbolos[coin], profundidad, funding_cache, funding_cada,
                              libro_crudo_cache, libro_crudo_cada, ls_ratio_cache, ls_ratio_cada,
                              trade_cache)
-                writer.writerow(fila)
-                arch.flush()
+                writer[coin].writerow(fila)
+                arch[coin].flush()
             time.sleep(cada)
     except KeyboardInterrupt:
         print("\nParado por el usuario.")
     finally:
-        arch.close()
+        for a in arch.values():
+            a.close()
+        for ruta_lock in rutas_lock:
+            try:
+                os.remove(ruta_lock)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

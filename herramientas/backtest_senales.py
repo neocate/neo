@@ -52,6 +52,7 @@
 #                                            [--horizontes 5,15,30] [--k 3] [--desde-1m]
 #                                            [--tolerancia-atr 0.25 --toques-min 4]
 #                                            [--refresco-niveles 30]
+#                                            [--dias-niveles-previos 90]
 #
 # Ejemplos:
 #   python herramientas/backtest_senales.py btc 15m
@@ -75,7 +76,7 @@ from herramientas.niveles_soporte import (
 )
 
 DIR_HISTORICOS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "historicos")
-DIAS_NIVELES_PREVIOS = 90.0  # mismo default que DIAS_HISTORICO_DEFAULT en monitor_niveles.py
+DIAS_NIVELES_PREVIOS = 90.0  # default - override con --dias-niveles-previos
 
 # Direccion que cada señal anticipa: +1 = espera subida, -1 = espera
 # bajada. impulso/aceleracion/ruptura son de CONTINUACION; rechazo/
@@ -250,7 +251,7 @@ def _backtest(velas, k, horizontes, desde_ms=None, tramos_niveles=None):
       "lejos"     - no hay ningun nivel vigente cerca
     (si hay de los dos tipos a la vez, gana "favorable" - caso raro).
     Devuelve:
-      disparos: {nombre_señal: {horizonte: [(retorno_pct, clase_o_None), ...]}}
+      disparos: {nombre_señal: {horizonte: [(retorno_pct, clase_o_None, ts_ms_señal), ...]}}
       baseline: {horizonte: [retorno_pct, ...]} de TODAS las velas (para comparar)
     """
     ventana_max = senales.VENTANA_MAXIMA
@@ -264,13 +265,16 @@ def _backtest(velas, k, horizontes, desde_ms=None, tramos_niveles=None):
     idx_tramo = 0
     for i in range(inicio, n):
         cierre_i = velas[i][4]
+        ts_i = velas[i][0]  # timestamp de la vela que dispara la señal - lo lleva
+                             # cada disparo (ver mas abajo) para que quien mida el
+                             # retorno en vivo (fjsl.py) pueda ubicar de que vela
+                             # exacta viene, sin tener que re-buscarla por fecha.
         for h in horizontes:
             if i + h < n:
                 baseline[h].append((velas[i + h][4] - cierre_i) / cierre_i * 100)
 
         niveles_vigentes = tolerancia_nivel = None
         if tramos_niveles:
-            ts_i = velas[i][0]
             while idx_tramo + 1 < len(tramos_niveles) and tramos_niveles[idx_tramo + 1][0] <= ts_i:
                 idx_tramo += 1
             _, niveles_vigentes, tolerancia_nivel = tramos_niveles[idx_tramo]
@@ -299,7 +303,7 @@ def _backtest(velas, k, horizontes, desde_ms=None, tramos_niveles=None):
             for h in horizontes:
                 if i + h < n:
                     retorno = (velas[i + h][4] - cierre_i) / cierre_i * 100
-                    disparos[nombre][h].append((retorno, clase))
+                    disparos[nombre][h].append((retorno, clase, ts_i))
 
     return disparos, baseline
 
@@ -336,6 +340,7 @@ def main():
     tolerancia_atr = toques_min = None
     confirmacion_velas = 2
     refresco_niveles = 30.0
+    dias_niveles_previos = DIAS_NIVELES_PREVIOS
     i = 0
     while i < len(resto):
         if resto[i] == "--fuente":
@@ -360,6 +365,8 @@ def main():
             i += 1; confirmacion_velas = int(resto[i])
         elif resto[i] == "--refresco-niveles":
             i += 1; refresco_niveles = float(resto[i])
+        elif resto[i] == "--dias-niveles-previos":
+            i += 1; dias_niveles_previos = float(resto[i])
         i += 1
 
     tf_carga = "1m" if desde_1m else tf
@@ -396,7 +403,7 @@ def main():
 
     desde_ms_carga = desde_ms
     if niveles_activo:
-        desde_ms_carga = desde_ms - int(DIAS_NIVELES_PREVIOS * 86_400_000)
+        desde_ms_carga = desde_ms - int(dias_niveles_previos * 86_400_000)
 
     print(f"Cargando {ruta}" + (f" ({_fmt_fecha(desde_ms_carga)} -> {_fmt_fecha(hasta_ms) if hasta_ms else 'fin'})"
                                  if desde_ms_carga else " (todo el historico)") + " ...")
@@ -423,30 +430,42 @@ def main():
             return
         hasta_ms_tramos = hasta_ms + 1 if hasta_ms is not None else velas[-1][0] + 1
         tramos_niveles = _niveles_por_tramos(velas, desde_ms, hasta_ms_tramos, refresco_niveles,
-                                              DIAS_NIVELES_PREVIOS, k, tolerancia_atr, toques_min,
+                                              dias_niveles_previos, k, tolerancia_atr, toques_min,
                                               confirmacion_velas)
         n_medio = sum(len(t[1]) for t in tramos_niveles) / len(tramos_niveles) if tramos_niveles else 0
         print(f"Niveles recalculados cada {refresco_niveles:.0f} dias ({len(tramos_niveles)} tramos, "
-              f"lookback {DIAS_NIVELES_PREVIOS:.0f}d): {n_medio:.0f} niveles vigentes de media por tramo")
+              f"lookback {dias_niveles_previos:.0f}d): {n_medio:.0f} niveles vigentes de media por tramo")
     print()
 
     disparos, baseline = _backtest(velas, k, horizontes, desde_ms, tramos_niveles)
-
     baseline_media = {h: _media(baseline[h]) for h in horizontes}
 
-    def _edge(retornos, direccion, h):
-        if not retornos:
-            return None, None, None
-        ret_dir = _media([r * direccion for r in retornos])
-        acierto = _tasa_acierto(retornos, direccion)
-        # 'edge' compara contra lo que ganaria la MISMA apuesta direccional
-        # sobre una vela cualquiera (direccion*baseline), no contra el
-        # baseline crudo - si el activo tiene tendencia neta en el periodo,
-        # comparar contra el baseline sin ajustar de signo favorece a
-        # ciegas a las señales que apuestan a favor de esa tendencia.
-        edge = ret_dir - direccion * baseline_media[h]
-        return ret_dir, acierto, edge
+    _tabla_principal(disparos, horizontes, baseline_media, niveles_activo)
+    if not niveles_activo:
+        return
+    _tabla_contraste(disparos, horizontes, tramos_niveles, baseline_media)
 
+
+def _edge(retornos, direccion, h, baseline_media):
+    """Antes vivia como closure dentro de main() (capturando baseline_media) -
+    se saca a nivel de modulo (2026-08-12) para que fjsl.py pueda reusarla
+    tal cual, en vez de reimplementar la misma formula."""
+    if not retornos:
+        return None, None, None
+    ret_dir = _media([r * direccion for r in retornos])
+    acierto = _tasa_acierto(retornos, direccion)
+    # 'edge' compara contra lo que ganaria la MISMA apuesta direccional
+    # sobre una vela cualquiera (direccion*baseline), no contra el
+    # baseline crudo - si el activo tiene tendencia neta en el periodo,
+    # comparar contra el baseline sin ajustar de signo favorece a
+    # ciegas a las señales que apuestan a favor de esa tendencia.
+    edge = ret_dir - direccion * baseline_media[h]
+    return ret_dir, acierto, edge
+
+
+def _tabla_principal(disparos, horizontes, baseline_media, niveles_activo):
+    """Extraida de main() (2026-08-12) para que fjsl.py imprima exactamente
+    la misma tabla en cada ciclo, sin duplicar el formateo."""
     cab = f"{'señal':<18}{'n':>7}"
     for h in horizontes:
         cab += f"   ret@{h}(%)  acierto%   edge@{h}(%)"
@@ -463,8 +482,8 @@ def main():
         n_disparos = len(disparos[nombre][horizontes[0]]) if horizontes else 0
         fila = f"{nombre:<18}{n_disparos:>7}"
         for h in horizontes:
-            retornos = [r for r, _ in disparos[nombre][h]]
-            resultado = _edge(retornos, direccion, h)
+            retornos = [r for r, _, _ in disparos[nombre][h]]
+            resultado = _edge(retornos, direccion, h, baseline_media)
             fila += (f"   {resultado[0]:>8.3f}  {resultado[1]:>7.1f}  {resultado[2]:>10.3f}"
                      if retornos else f"   {'--':>8}  {'--':>7}  {'--':>10}")
         print(fila)
@@ -474,9 +493,9 @@ def main():
     print("cualquiera (direccion x retorno medio de TODO el historico a esa distancia) - aisla el")
     print("aporte de la señal en si de la tendencia neta del periodo. edge@N ~ 0 = sin borde real.")
 
-    if not niveles_activo:
-        return
 
+def _tabla_contraste(disparos, horizontes, tramos_niveles, baseline_media):
+    """Extraida de main() (2026-08-12), mismo motivo que _tabla_principal."""
     tolerancias = [t[2] for t in tramos_niveles if t[1]]
     rango_tol = f"{min(tolerancias):.4f}-{max(tolerancias):.4f}" if tolerancias else "--"
     print(f"\n=== Contraste por contexto de nivel vigente (tolerancia por tramo: {rango_tol}) ===")
@@ -497,11 +516,11 @@ def main():
         direccion = DIRECCION_ESPERADA[nombre]
         fila = f"{nombre:<18}"
         for cat in categorias:
-            retornos_h0 = [r for r, c in disparos[nombre][horizontes[0]] if c == cat]
+            retornos_h0 = [r for r, c, _ in disparos[nombre][horizontes[0]] if c == cat]
             fila += f"{len(retornos_h0):>9}"
             for h in horizontes:
-                retornos = [r for r, c in disparos[nombre][h] if c == cat]
-                resultado = _edge(retornos, direccion, h)
+                retornos = [r for r, c, _ in disparos[nombre][h] if c == cat]
+                resultado = _edge(retornos, direccion, h, baseline_media)
                 fila += f"  {resultado[2]:>10.3f}" if retornos else f"  {'--':>10}"
         print(fila)
     print("\nCompara edge_favo/edge_cont/edge_lejo por señal - si son parecidos, el contexto de nivel")
