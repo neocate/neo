@@ -15,11 +15,14 @@ herramientas/libro/
 historico_*.csv
 flujo_*.csv
 
-# Cache de historicos completos (Binance, 2017+) - GBs de datos, cada PC
-# los descarga/actualiza con herramientas/descargar_bin.py (nombre real:
-# <DD-MM-AA>_<COIN>_<TF>_binance.csv, sin prefijo "historico_" - por eso
-# necesita su propio patron, el de arriba no lo cubre).
-herramientas/historicos/
+# Cache de historicos completos (Binance, 2017+) - GBs de datos (nombre
+# real: <DD-MM-AA>_<COIN>_<TF>_binance.csv, sin prefijo "historico_" - por
+# eso necesita su propio patron, el de arriba no lo cubre). Vive en
+# <raiz>/historicos/ (lo que lee backtest_senales.py, DIR_HISTORICOS), se
+# rellena por FTP - la regla antigua "herramientas/historicos/" apuntaba a
+# donde escribe descargar_bin.py, que no es donde se lee de verdad (ver
+# anotaciones.md 2026-08-12).
+historicos/
 
 # Logs de procesos lanzados en background (ej. nohup ... > libro.log &).
 *.log

@@ -276,7 +276,7 @@ def main():
             time.sleep(cada)
     except KeyboardInterrupt:
         print("\nParado por el usuario.")
-        _imprimir_confirmaciones(confirmaciones)
+        print(_texto_confirmaciones(confirmaciones))
     finally:
         log.close()
 

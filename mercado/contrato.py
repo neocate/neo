@@ -6,6 +6,8 @@ import ccxt
 import os
 from dotenv import load_dotenv
 
+from mercado import datos
+
 load_dotenv()
 
 _cliente = None
@@ -115,28 +117,34 @@ def _leer_leverage(mercado):
     return leverage_maximo, margen_maximo
 
 def _leer_funding_rate(cliente, simbolo):
-    """Lee funding rate actual (futuros). Retorna None si no aplica."""
+    """Lee funding rate actual (futuros). Retorna None si no aplica o falla.
+
+    Reusa mercado.datos.funding_rate() (fetch_funding_rate de ccxt, ya
+    probado en vivo - lo usa herramientas/grabador_libro.py) en vez de
+    duplicar la llamada aqui - antes esta funcion era un stub que devolvia
+    None siempre ("CCXT puede no tener esto"), lo que habria dado datos
+    silenciosamente vacios al futuro uso de obtener_contrato() para la
+    cartera simulada (ver PENDIENTES.md, marcador_tpsl.py: "que lea
+    contrato para comisiones y funding")."""
     if ':' not in simbolo:
         return None  # No es futuros
-
     try:
-        # Bitget API para funding rate
-        # CCXT puede no tener esto, así que retornamos None por ahora
-        # En la práctica, usarías cliente.private_request() o REST directo
-        return None
-    except:
+        return datos.funding_rate(simbolo)
+    except ValueError:
         return None
 
 def _leer_interest_rate(cliente, simbolo):
-    """Lee interest rate de margen. Retorna None si no aplica."""
+    """Lee interest rate de margen. Retorna None si no aplica.
+
+    Sin implementar A PROPOSITO, no es un descuido: este proyecto solo
+    opera futuros USDT-M (ver mercado/datos.py, herramientas/descargar_bit.py
+    - todos los simbolos traen ':', nunca margen), y Bitget exige un
+    endpoint privado propio para esto que no esta cableado en ningun sitio
+    del proyecto todavia. Si algun dia se opera margen de verdad, esto
+    necesita una implementacion real, no basta con quitar este comentario."""
     if ':' in simbolo:
         return None  # Es futuros, no margen
-
-    try:
-        # Similar a funding rate, Bitget requiere endpoint privado
-        return None
-    except:
-        return None
+    return None
 
 def resumen(simbolo):
     """Imprime resumen del contrato en formato legible."""

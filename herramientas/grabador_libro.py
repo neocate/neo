@@ -285,14 +285,30 @@ def _ls_ratio(coin, simbolo, cache, ls_ratio_cada):
 def _trade_flow(coin, simbolo, cache):
     """Trades ejecutados desde la ultima vuelta (lado agresor buy/sell) y el
     CVD acumulado DESDE QUE ARRANCO este proceso (no hay forma de reconstruir
-    el CVD de antes). 'cache' es {coin: {cursor, cvd, iniciado}}, mutada
-    in-place. Devuelve (n_trades, vol_buy, vol_sell, cvd).
+    el CVD de antes). 'cache' es {coin: {cursor, cursor_ids, cvd, iniciado}},
+    mutada in-place. Devuelve (n_trades, vol_buy, vol_sell, cvd).
 
     Primera vuelta por moneda: solo fija el cursor en el ultimo trade visto,
     sin sumar nada al CVD - si no, los <=500 trades del primer fetch (que
     pueden ser de minutos u horas atras) se contarian de golpe como si
-    hubieran pasado en este instante, un salto de CVD que no fue real."""
-    estado = cache.setdefault(coin, {"cursor": None, "cvd": 0.0, "iniciado": False})
+    hubieran pasado en este instante, un salto de CVD que no fue real.
+
+    Dedup por 'id' de trade en el timestamp FRONTERA (2026-08-12, bug real
+    encontrado por Claude en auditoria de algebra): antes se descartaba
+    cualquier trade con tt <= ultimo (comparacion SOLO por timestamp, ms).
+    Bitget puede ejecutar mas de un trade en el mismo milisegundo (nada raro
+    en BTC/ETH en momentos de volumen) - si uno de esos ya se conto en la
+    vuelta anterior, el otro (real, nunca contado) se descartaba tambien por
+    tener el MISMO timestamp, perdiendo su volumen del CVD en silencio. Esto
+    era invisible para verificar_flujo.py: el trade perdido nunca llegaba a
+    sumarse a ningun lado, asi que cvd[i] == cvd[i-1]+delta_vol[i] seguia
+    cuadrando perfectamente (consistente consigo mismo, pero con menos
+    volumen del que hubo de verdad). Ahora solo se descarta por timestamp
+    estrictamente MENOR que el cursor; a igualdad de timestamp, se descarta
+    por 'id' ya visto (ccxt normaliza ese campo en todos los exchanges) - un
+    trade nuevo en el mismo milisegundo ya no se pierde."""
+    estado = cache.setdefault(coin, {"cursor": None, "cursor_ids": frozenset(),
+                                      "cvd": 0.0, "iniciado": False})
     try:
         trades = datos.trades(simbolo, desde=estado["cursor"], limite=500)
     except Exception as e:
@@ -302,16 +318,25 @@ def _trade_flow(coin, simbolo, cache):
     if not estado["iniciado"]:
         estado["iniciado"] = True
         if trades:
-            estado["cursor"] = trades[-1].get("timestamp")
+            marcas = [t.get("timestamp") for t in trades if t.get("timestamp") is not None]
+            if marcas:
+                estado["cursor"] = max(marcas)
+                estado["cursor_ids"] = frozenset(
+                    t.get("id") for t in trades
+                    if t.get("timestamp") == estado["cursor"] and t.get("id") is not None)
         return 0, 0.0, 0.0, estado["cvd"]
 
     n = 0
     vb = vs = 0.0
     ultimo = estado["cursor"]
+    ids_frontera = set(estado["cursor_ids"])
     for t in trades:
-        tt = t.get("timestamp")
-        if ultimo is not None and tt is not None and tt <= ultimo:
-            continue  # ya contado en una vuelta anterior
+        tt, tid = t.get("timestamp"), t.get("id")
+        if ultimo is not None and tt is not None:
+            if tt < ultimo:
+                continue  # ya contado en una vuelta anterior, sin ambiguedad
+            if tt == ultimo and tid is not None and tid in ids_frontera:
+                continue  # mismo trade del timestamp frontera, ya contado
         n += 1
         amt = t.get("amount") or 0.0
         lado = t.get("side")
@@ -319,9 +344,13 @@ def _trade_flow(coin, simbolo, cache):
             vb += amt
         elif lado == "sell":
             vs += amt
-        if tt is not None and (ultimo is None or tt > ultimo):
-            ultimo = tt
+        if tt is not None:
+            if ultimo is None or tt > ultimo:
+                ultimo, ids_frontera = tt, set()
+            if tt == ultimo and tid is not None:
+                ids_frontera.add(tid)
     estado["cursor"] = ultimo
+    estado["cursor_ids"] = frozenset(ids_frontera)
     estado["cvd"] += vb - vs
     return n, vb, vs, estado["cvd"]
 

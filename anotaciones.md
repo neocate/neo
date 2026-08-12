@@ -1,5 +1,142 @@
 # Anotaciones
 
+- 2026-08-12: Auditoria de "algebra" (formulas/calculos) sobre todo el
+  proyecto a peticion de Fran ("el algebra completo de los py, calculos,
+  pruebas... etc"), tras el repaso de inconsistencias estructurales de la
+  entrada de abajo. Revisadas formula por formula: `mercado/indicadores.py`
+  (SMA/EMA/RSI/ATR/ADX Wilder/RVOL/extremos_locales - alineacion de indices
+  correcta en todas, sin off-by-one), `mercado/flujo.py` (mid/spread_bps/
+  imbalance/microprecio), las 12 señales de `mercado/senales.py` (ventanas
+  "previas" excluyen bien la vela actual, sin lookahead bias),
+  `niveles_soporte.py` (clustering/toques/vivo-roto-flip) y
+  `backtest_senales.py` (formula de `edge@N`, agregacion 1m->TF,
+  ventanas de niveles sin fuga de informacion del futuro) - todo correcto,
+  sin bugs. Confirmado tambien: el proyecto no tiene ningun test
+  automatizado (`pytest`/`unittest`/carpeta `tests/`), solo los backtests
+  manuales.
+  - Un hallazgo real, en `grabador_libro.py._trade_flow()`: el CVD
+    descartaba trades ya contados comparando SOLO por timestamp (`tt <=
+    ultimo: continue`). Si Bitget ejecuta mas de un trade en el MISMO
+    milisegundo (no es raro en BTC/ETH en momentos de volumen) y uno ya se
+    conto en la vuelta anterior, el otro - real, nunca contado - se
+    descartaba tambien por tener el mismo timestamp: su volumen
+    desaparecia del CVD en silencio. Invisible para `verificar_flujo.py`:
+    el trade perdido nunca llegaba a sumarse a ningun lado, asi que
+    `cvd[i] == cvd[i-1]+delta_vol[i]` seguia cuadrando perfectamente
+    (consistente consigo mismo, pero con menos volumen real del que hubo).
+    Arreglado con dedup por `id` de trade (campo que ccxt normaliza en
+    todos los exchanges) en el timestamp FRONTERA: solo se descarta por
+    timestamp estrictamente MENOR que el cursor; a igualdad de timestamp,
+    se descarta por `id` ya visto, no por el valor del timestamp.
+    Verificado en DOS niveles (a peticion explicita de Fran: "haz llamadas
+    reales para probar, es importante para dejarlo en datos ficticios" -
+    no bastaba con datos simulados): (1) trades simulados a mano, y (2)
+    llamadas REALES a la API publica de Bitget (`fetch_trades` no necesita
+    credenciales, no hay `.env` en esta maquina y aun asi funciono) contra
+    ETH/USDT:USDT en vivo. Los datos reales confirmaron que el problema NO
+    era un caso raro de laboratorio: en un solo lote de 500 trades reales
+    habia colisiones de timestamp por todas partes, la mayor con **37
+    trades en el MISMO milisegundo** - replicando el corte de cursor justo
+    despues del primero de ese cluster, la logica VIEJA (solo timestamp)
+    habria perdido 36 de esos 37 trades reales, **51.1 ETH de volumen real
+    desaparecido del CVD sin ningun aviso**. `_trade_flow()` tambien se
+    probo end-to-end con 3 vueltas reales seguidas (arranque + 2 rondas mas
+    tras esperar trades nuevos de verdad) - CVD acumulando de forma
+    coherente, sin duplicar ni perder el cursor. De paso, la semilla del
+    cursor en la primera vuelta pasa de `trades[-1].get("timestamp")`
+    (asumia que la API devuelve los trades ya ordenados) a `max(...)` sobre
+    todos los timestamps del lote, mas robusto.
+  - De la entrada de abajo (repaso de inconsistencias), un detalle que se
+    quedo sin documentar: `_pid_vivo()` en `monitor_comun.py` ademas fija
+    `restype`/`argtypes` explicitos en la llamada a `OpenProcess` por
+    `ctypes` - sin eso, ctypes asume que devuelve un `int` de 32 bits, pero
+    un `HANDLE` de Windows es de 64 bits en sistemas x64 (en la practica
+    los handles del kernel caben en 32 bits y no se ha visto truncarse,
+    pero mejor no depender de eso). Probado en esta misma maquina Windows
+    contra el PID del propio proceso Python (vivo) y un PID casi con
+    certeza libre.
+
+- 2026-08-12: Repaso de inconsistencias entre los `.py` del proyecto
+  (pedido explicito de Fran: "repasa los py para ver inconsistencias"),
+  pasada con `ast` para localizar llamadas a funciones no definidas ni
+  importadas en cada modulo + lectura cruzada de cabeceras/contratos entre
+  ficheros hermanos. 6 arreglos:
+  - `validador_niveles.py`/`marcador_tpsl.py`: el handler de
+    `except KeyboardInterrupt` de cada uno llamaba a
+    `_imprimir_confirmaciones`/`_imprimir_marcador`, resto del refactor
+    "imprimir -> devolver texto" del 2026-08-12 (ver entrada de Telegram
+    mas abajo) que nunca se actualizo aqui - `NameError` real al parar
+    cualquiera de los dos con Ctrl+C en vez de un cierre limpio. Arreglado
+    a `print(_texto_confirmaciones(...))`/`print(_texto_marcador(...))`.
+  - `monitor_comun._requerir_grabador_libro()` comprobaba el PID del
+    `.lock` con `os.kill(pid, 0)` (patron POSIX: señal 0 = solo
+    comprobar). En Windows, `os.kill()` con cualquier señal que no sea
+    CTRL_C_EVENT/CTRL_BREAK_EVENT llama de verdad a `TerminateProcess()` -
+    si el PID (de un proceso Linux del NAS) coincidiera por casualidad con
+    un proceso vivo en una maquina Windows corriendo esto (soportado, ver
+    entrada de monitor_niveles.py 2026-08-07), lo mataria en vez de solo
+    comprobarlo. Nueva `_pid_vivo()`: en POSIX sigue usando `os.kill(pid,
+    0)`, en Windows usa `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` +
+    `CloseHandle` (solo consulta, nunca termina).
+  - `telegram_control.py`: `_enviar()` (flujo de texto libre) troceaba en
+    bloques de 4000 caracteres antes de mandar, pero `_enviar_menu()`/
+    `_editar_menu()` (flujo de botones, incluido "Resumen") mandaban el
+    texto entero en una sola llamada - con varios coin/tf activos
+    `cmd_resumen()` puede superar el limite de Telegram (~4096) y fallar en
+    silencio solo por boton. Ahora las dos trocean igual
+    (`LIMITE_TELEGRAM`); `_editar_menu` con texto largo manda el contenido
+    troceado como mensaje nuevo y deja el mensaje del boton como puntero
+    corto (no se puede "editar" un mensaje hacia varios).
+  - `mercado/contrato.py._leer_funding_rate()` era un stub que devolvia
+    `None` siempre ("CCXT puede no tener esto, por ahora") - relevante
+    porque el diseño ya acordado de la Cartera Simulada (PENDIENTES.md,
+    cabecera de `marcador_tpsl.py`) dice "que lea contrato para comisiones
+    y funding". Ahora reusa `mercado.datos.funding_rate()` (implementacion
+    real via `fetch_funding_rate` de ccxt, ya en uso por
+    `grabador_libro.py`) en vez de duplicar/dejar sin hacer.
+    `_leer_interest_rate()` se deja como stub pero con comentario explicito
+    de que es a proposito (el proyecto solo opera futuros, nunca margen).
+  - `datos.normalizar_simbolo()` no tenia el passthrough de "ya trae '/'"
+    que si tenian `descargar_bit.py`/`descargar_bin.py._simbolo` -
+    llamarla con un simbolo ya normalizado la habria roto
+    (`'ETH/USDT:USDT/USDT:USDT'`). Añadido el passthrough, y
+    `descargar_bit.py._simbolo` ahora delega en ella en vez de reimplementar
+    la misma conversion Bitget-futuros a mano (mismo exchange, mismo
+    formato). `descargar_bin.py._simbolo` se deja SEPARADA a proposito
+    (Binance spot, formato de simbolo distinto - no es duplicacion real) con
+    comentario aclarandolo para que nadie la "unifique" por error mas
+    adelante.
+  Verificado con `python -m py_compile` en los 8 ficheros tocados, la
+  pasada de `ast` repetida (0 llamadas a nombres no definidos en todo el
+  proyecto), y pruebas puntuales de `normalizar_simbolo`/`_simbolo`/
+  `_pid_vivo` (esta ultima contra el PID del propio proceso Python, vivo de
+  verdad, y un PID casi con certeza libre - nunca contra un proceso ajeno,
+  para no arriesgarse con la propia funcion que se estaba corrigiendo).
+
+- 2026-08-12: `mirar.md` borrado - sus 3 hallazgos (todos del mismo dia,
+  "post `dc66cd0`") ya estaban resueltos por commits posteriores del propio
+  2026-08-11/12, el fichero nunca se actualizo para reflejarlo: (1)
+  `VELAS_OBJETIVO=500` (cap por velas) se revirtio a `DIAS_OBJETIVO=90` ese
+  mismo dia - `descargar_bit.py` linea 91 ya lo documenta con referencia
+  cruzada a `mirar.md`; (2) el auto-arranque fijo a BTC/ETH que denunciaba
+  se retiro por completo el 2026-08-12 (ver entrada de la cascada, mas
+  abajo); (3) el comentario huerfano `DIAS_HISTORICO_DEFAULT` en
+  `backtest_senales.py` ya no existe en el fichero. Corregido de paso,
+  detectado al revisar esto: `.gitignore` ignoraba `herramientas/historicos/`
+  pero el `historicos/` real (el que lee `backtest_senales.py`,
+  `DIR_HISTORICOS`) vive en la RAIZ del repo y se rellena por FTP manual
+  via FileZilla (dato de Fran, no hay script/cron que automatice esto) -
+  `descargar_bin.py` tambien apuntaba mal (su propio
+  `DIR_HISTORICOS` escribia en `herramientas/historicos/`, un sitio que
+  `backtest_senales.py` nunca mira). Regla de `.gitignore` corregida a
+  `historicos/` y `DIR_HISTORICOS` de `descargar_bin.py` corregido para
+  apuntar a la raiz, igual que `backtest_senales.py` - entrada
+  correspondiente en `PENDIENTES.md` retirada por resuelta. De paso, dato
+  de Fran: `herramientas/libro/` (CSVs en vivo de `grabador_libro.py`/
+  `monitor_niveles.py`/etc., ya ignorado en `.gitignore`) TAMBIEN viaja por
+  FTP manual via FileZilla, no solo `historicos/` - mismo mecanismo de
+  transporte (manual, sin automatizar) para los dos.
+
 - 2026-08-12: Telegram pasa a modo SOLO PULL. `herramientas/telegram_control.py`
   creado (adaptado del patron ya probado en `D:\neocat\bit\telegram_control.py`:
   mismo `getUpdates`/offset persistido/teclados inline, sin las "ramas"/

@@ -85,10 +85,14 @@ def _get_updates(offset, timeout=30):
         return []
 
 
+LIMITE_TELEGRAM = 4000  # Telegram corta sendMessage/editMessageText en ~4096
+                         # caracteres - mismo margen de sobra para los dos.
+
+
 def _enviar(texto):
     """Trocea en bloques de <4000 caracteres - Telegram corta mensajes largos."""
-    for i in range(0, len(texto), 4000):
-        avisos.enviar(texto[i:i + 4000])
+    for i in range(0, len(texto), LIMITE_TELEGRAM):
+        avisos.enviar(texto[i:i + LIMITE_TELEGRAM])
 
 
 def _api(metodo, **params):
@@ -115,16 +119,38 @@ def _teclado(filas):
 
 
 def _enviar_menu(chat_id, texto, filas=None):
-    kwargs = {"chat_id": chat_id, "text": texto}
+    """Si 'texto' no cabe en un solo mensaje, se trocea (igual que _enviar()
+    para el flujo de texto libre) - antes esto mandaba todo en una sola
+    llamada a sendMessage sin trocear, y con --resumen de varios coin/tf
+    activos Telegram podia rechazar el mensaje entero por pasarse del
+    limite. Solo el ULTIMO trozo lleva teclado."""
+    if len(texto) <= LIMITE_TELEGRAM:
+        kwargs = {"chat_id": chat_id, "text": texto}
+        if filas:
+            kwargs["reply_markup"] = _teclado(filas)
+        return _api("sendMessage", **kwargs)
+    trozos = [texto[i:i + LIMITE_TELEGRAM] for i in range(0, len(texto), LIMITE_TELEGRAM)]
+    for trozo in trozos[:-1]:
+        _api("sendMessage", chat_id=chat_id, text=trozo)
+    kwargs = {"chat_id": chat_id, "text": trozos[-1]}
     if filas:
         kwargs["reply_markup"] = _teclado(filas)
     return _api("sendMessage", **kwargs)
 
 
 def _editar_menu(chat_id, message_id, texto, filas=None):
-    """Reescribe el propio mensaje del boton pulsado. Si ya no se puede
-    editar (borrado, o mas de 48h), manda uno nuevo para no perder la
-    respuesta en silencio."""
+    """Reescribe el propio mensaje del boton pulsado. Si 'texto' no cabe en
+    un solo mensaje, no hay forma de "editar" hacia varios - se manda
+    troceado como mensaje(s) NUEVOS (_enviar_menu, mismo limite) y el
+    mensaje original del boton se deja como puntero corto, sin teclado. Si
+    ya no se puede editar (borrado, o mas de 48h), tambien cae a mandar uno
+    nuevo, para no perder la respuesta en silencio."""
+    if len(texto) > LIMITE_TELEGRAM:
+        _enviar_menu(chat_id, texto, filas)
+        _api("editMessageText", chat_id=chat_id, message_id=message_id,
+             text="(respuesta larga, mandada como mensaje nuevo arriba ⬆️)",
+             reply_markup={"inline_keyboard": []})
+        return
     kwargs = {"chat_id": chat_id, "message_id": message_id, "text": texto}
     kwargs["reply_markup"] = _teclado(filas) if filas else {"inline_keyboard": []}
     if _api("editMessageText", **kwargs) is None:

@@ -29,8 +29,3 @@
   el 2026-08-12 (ICP sin `--feed` durante horas sin que nada avisara hasta
   mirar los logs a mano).
 
-- **Desajuste de `.gitignore`**: la regla `herramientas/historicos/`
-  (pensada para el caché de velas profundas de Binance, GBs de datos) no
-  cubre el `historicos/` real, que está en la raíz del repo, no dentro de
-  `herramientas/`. Por ahora se excluye a mano del `git add` en cada
-  commit - pendiente corregir la regla o mover la carpeta.

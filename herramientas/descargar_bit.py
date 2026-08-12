@@ -85,6 +85,7 @@ import ccxt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mercado.senales import VENTANA_MAXIMA
+from mercado import datos
 
 DIR_LIBRO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libro")
 
@@ -95,11 +96,12 @@ TIMEFRAMES_FEED = ["1m","3m","5m", "15m", "30m", "1h", "4h", "1d"]
 
 
 def _simbolo(coin):
-    """'eth' -> 'ETH/USDT:USDT' (futuros USDT-M); deja intactos los que ya traen '/'."""
-    coin = coin.strip()
-    if '/' in coin:
-        return coin.upper()
-    return f"{coin.upper()}/USDT:USDT"
+    """'eth' -> 'ETH/USDT:USDT' (futuros USDT-M); deja intactos los que ya
+    traen '/'. Delega en datos.normalizar_simbolo(coin, "f") - antes esto
+    reimplementaba la misma conversion a mano, con riesgo de que las dos
+    copias divergieran silenciosamente si cambiaba la convencion de
+    simbolos de Bitget."""
+    return datos.normalizar_simbolo(coin.strip(), "f")[0]
 
 
 def _archivo(coin, timeframe):

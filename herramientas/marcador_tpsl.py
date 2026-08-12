@@ -321,7 +321,7 @@ def main():
             time.sleep(cada)
     except KeyboardInterrupt:
         print("\nParado por el usuario.")
-        _imprimir_marcador(stats)
+        print(_texto_marcador(stats))
     finally:
         log.close()
 

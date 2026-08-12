@@ -168,26 +168,63 @@ def _proceso_corriendo(fragmentos):
 # DESPUES de arrancar, este monitor no se entera ni se para solo.
 
 
+def _pid_vivo(pid):
+    """True si el proceso 'pid' sigue vivo, SIN arriesgarse a matarlo.
+
+    En POSIX (el NAS, donde corre grabador_libro.py de verdad), os.kill(pid,
+    0) es el patron estandar: la señal 0 no se entrega, solo prueba
+    existencia/permisos. En Windows (donde este chequeo tambien puede
+    correr - ver anotaciones.md, monitor_niveles.py soportado desde
+    PowerShell), os.kill() con cualquier señal que no sea
+    CTRL_C_EVENT/CTRL_BREAK_EVENT llama de verdad a TerminateProcess() - si
+    el PID leido del .lock (escrito por un proceso Linux del NAS)
+    coincidiera por casualidad con un proceso vivo en la maquina Windows,
+    esto lo mataria en vez de solo comprobarlo. Se evita abriendo el
+    proceso con permisos de SOLO CONSULTA (PROCESS_QUERY_LIMITED_INFORMATION)
+    en vez de con os.kill."""
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    import ctypes
+    import ctypes.wintypes as wt
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    abrir = ctypes.windll.kernel32.OpenProcess
+    # restype/argtypes explicitos: sin esto ctypes asume que OpenProcess
+    # devuelve un 'int' de 32 bits, pero un HANDLE de Windows es de 64 bits
+    # en sistemas x64 - en la practica los handles que da el kernel caben
+    # en 32 bits (no se ha visto truncarse), pero mejor no depender de eso.
+    abrir.restype = wt.HANDLE
+    abrir.argtypes = (wt.DWORD, wt.BOOL, wt.DWORD)
+    handle = abrir(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    ctypes.windll.kernel32.CloseHandle(handle)
+    return True
+
+
 def _requerir_grabador_libro(coin):
     """True si hay un grabador_libro.py vivo para 'coin' - comprueba el
     lock DIR_LIBRO/grabador_libro_<COIN>.lock (por moneda, ver
     grabador_libro._bloquear_instancia_unica) y que el PID de dentro siga
-    vivo. NO se puede comprobar con _proceso_corriendo(["grabador_libro.py",
-    coin]): si se lanzo combinado ("grabador_libro.py btc,eth"), la moneda
-    no aparece como token suelto en la linea de comando tal cual se
-    escribio - el lock, en cambio, es siempre por moneda, se lance como se
-    lance (y Fran ha confirmado que a partir de ahora lanza cada moneda
-    como proceso independiente, lo que hace este chequeo aun mas fiable)."""
+    vivo (ver _pid_vivo). NO se puede comprobar con
+    _proceso_corriendo(["grabador_libro.py", coin]): si se lanzo combinado
+    ("grabador_libro.py btc,eth"), la moneda no aparece como token suelto
+    en la linea de comando tal cual se escribio - el lock, en cambio, es
+    siempre por moneda, se lance como se lance (y Fran ha confirmado que a
+    partir de ahora lanza cada moneda como proceso independiente, lo que
+    hace este chequeo aun mas fiable)."""
     ruta_lock = os.path.join(DIR_LIBRO, f"grabador_libro_{coin.upper()}.lock")
     if not os.path.exists(ruta_lock):
         return False
     try:
         with open(ruta_lock) as f:
             pid = int(f.read().strip())
-        os.kill(pid, 0)
-        return True
     except (OSError, ValueError):
         return False
+    return _pid_vivo(pid)
 
 
 def _requerir_feed_velas():

@@ -7,9 +7,10 @@
 # Este script es para backtests largos donde el histórico profundo importa
 # más que la fidelidad exacta al venue de ejecución.
 #
-# Cache PERMANENTE en herramientas/historicos/ (convencion de Fran,
-# 2026-08-06, ver anotaciones.md): un fichero por coin/tf con el DIA DE
-# CORTE delante del nombre en vez de re-descargar todo cada vez -
+# Cache PERMANENTE en <raiz>/historicos/ (convencion de Fran, 2026-08-06,
+# ver anotaciones.md; esa carpeta se rellena por FTP - ver anotaciones.md
+# 2026-08-12): un fichero por coin/tf con el DIA DE CORTE delante del
+# nombre en vez de re-descargar todo cada vez -
 #     DD-MM-AA_<COIN>_<TF>_binance.csv   (ej. 05-08-26_ETH_1m_binance.csv)
 # Si NO existe fichero para esa coin/tf: descarga TODO el historico
 # disponible. Si YA existe: lee la ULTIMA vela guardada (del propio
@@ -40,11 +41,18 @@ from datetime import datetime, timedelta, timezone
 
 import ccxt
 
-DIR_HISTORICOS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "historicos")
+DIR_HISTORICOS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "historicos")
 
 
 def _simbolo(coin):
-    """'eth' -> 'ETH/USDT'; deja intactos los que ya traen '/'."""
+    """'eth' -> 'ETH/USDT'; deja intactos los que ya traen '/'.
+
+    Deliberadamente SEPARADO de mercado.datos.normalizar_simbolo() /
+    herramientas/descargar_bit.py._simbolo (que si la reusan): este script
+    baja de BINANCE spot, no de Bitget, y el formato de simbolo no es el
+    mismo ('ETH/USDT' aqui vs 'ETH/USDT:USDT' futuros alli) - unificarlas
+    seria juntar dos convenciones de exchanges distintos, no quitar
+    duplicacion real."""
     coin = coin.strip()
     if '/' in coin:
         return coin.upper()
@@ -57,7 +65,7 @@ def _fecha_str(fecha):
 
 
 def _archivo_existente(coin_code, timeframe):
-    """Busca 'DD-MM-AA_<COIN>_<TF>_binance.csv' en herramientas/historicos/.
+    """Busca 'DD-MM-AA_<COIN>_<TF>_binance.csv' en <raiz>/historicos/.
     El mas reciente por fecha de MODIFICACION si hubiera mas de uno (no
     deberia, pero por si una actualizacion vieja fallo a medio renombrar).
     None si no hay ninguno todavia."""

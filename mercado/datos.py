@@ -26,7 +26,9 @@ def normalizar_simbolo(par, tipo_mercado, modo=None):
     """Normaliza símbolo según tipo de mercado.
 
     Args:
-        par: str (ej: 'eth', 'btc')
+        par: str (ej: 'eth', 'btc' - o un símbolo YA normalizado como
+             'ETH/USDT:USDT', que se deja intacto tal cual venga, mismo
+             criterio que herramientas/descargar_bit.py._simbolo)
         tipo_mercado: 'f' (futuros), 'm' (margen), 's' (spot)
         modo: 'isolated' o 'cross' (solo aplica a margen/futuros)
               default: 'cross' para futuros, 'isolated' para margen
@@ -35,6 +37,8 @@ def normalizar_simbolo(par, tipo_mercado, modo=None):
         tuple: (simbolo, modo_efectivo)
                ej: ('ETH/USDT:USDT', 'cross') para futuros
     """
+    if '/' in par:
+        return par.upper(), modo
     simbolo_base = f"{par.upper()}/USDT"
     tipo = tipo_mercado.lower()
 
