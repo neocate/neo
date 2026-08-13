@@ -83,9 +83,122 @@
     guardar en `bids_json`/`asks_json` para no persistir ese elemento
     redundante ni casi doblar el tamaño del JSON sin necesidad.
 
-  Estado al cerrar la sesion: lanzado en paralelo con los 3 procesos REST
-  de siempre (btc/eth/icp, PIDs 18047/18048/18049 sin tocar) para comparar
-  unos minutos antes de cortar a produccion - ver PENDIENTES.md.
+  Estado al cerrar ESTA parte de la sesion: lanzado en paralelo con los 3
+  procesos REST de siempre (btc/eth/icp, PIDs 18047/18048/18049 sin tocar)
+  para comparar unos minutos antes de cortar a produccion - continua en la
+  entrada de abajo, misma sesion.
+
+- 2026-08-13 (continuacion): auditoria de `grabador_libro.py` a peticion
+  explicita de Fran ("de momento, grabador_libro lo ves correcto para su
+  funcion? o crees que el codigo no esta bien?"), fichero completo mas los
+  dos modulos propios que importa (`mercado/datos.py`, `mercado/flujo.py`).
+  Un bug real encontrado y arreglado, mas tres ajustes pedidos sobre la
+  marcha - `PENDIENTES.md` se elimino en esta sesion (decision de Fran,
+  fuera de esta entrada), asi que lo pendiente de comparar REST-vs-WS y
+  cortar a produccion (parrafo de arriba) queda documentado solo aqui de
+  ahora en adelante, sin ese fichero como referencia cruzada.
+
+  - **Bug real:** `_recuperar_hueco()` (linea ~505) reintroducia el MISMO
+    bug de CVD que ya se arreglo el 2026-08-12 en la version REST (dedup
+    por timestamp perdiendo trades del mismo milisegundo) - pero en la
+    recuperacion de huecos nueva de la reescritura WS de ayer, que nunca
+    paso por esa auditoria porque no existia todavia. Filtraba con `tt <=
+    ts_previo: continue`, descartando CUALQUIER trade del milisegundo
+    frontera sin llegar a comprobar su `id` en `_procesar_trade` - un
+    trade nuevo real que compartiera ese ms con el cursor se perdia en
+    silencio (mismo patron que el bug original: hasta 37 trades reales en
+    un solo ms, documentado el 2026-08-12). Arreglado a `tt < ts_previo`
+    (estricto) - a igualdad de timestamp, ahora es `_procesar_trade` quien
+    decide por `id` ya visto, igual que en el ingest normal. Verificado
+    importando la funcion REAL del fichero (no una copia) con un cluster
+    sintetico en el mismo ms: con `<=` contaba 1 de 3 trades nuevos
+    esperados, con `<` los 3.
+  - **Cross-platform:** `_lock_libre_o_huerfano()` usaba `os.kill(pid, 0)`
+    crudo - en Windows, cualquier señal que no sea CTRL_C_EVENT/
+    CTRL_BREAK_EVENT dispara `TerminateProcess()` de verdad (mismo riesgo
+    ya corregido en `monitor_comun._pid_vivo()` el 2026-08-12, pero nunca
+    aplicado aqui). Nueva `_pid_vivo()` DUPLICADA en `grabador_libro.py`
+    (mismo patron POSIX/`os.kill`+Windows/`OpenProcess(
+    PROCESS_QUERY_LIMITED_INFORMATION)` que la de `monitor_comun.py` - no
+    se importa de ahi porque `monitor_comun.py` ya importa DE
+    `grabador_libro.py`, importar en el otro sentido crearia un ciclo).
+    Verificado en Windows: PID propio vivo, PID 999999 muerto.
+  - **`long_short_ratio` de ICP falla siempre:** Bitget devuelve `40054`
+    "The data fetched by ICPUSDT is empty" - confirmado llamando al
+    endpoint publico directo (sin pasar por el proyecto): BTC/ETH
+    funcionan normal, ICP falla siempre igual, en las dos variantes del
+    endpoint (`account-long-short` y `position-long-short`). No es un
+    corte transitorio, Bitget no calcula ese dato para ICPUSDT (probable
+    volumen/interes abierto insuficiente) - `open_interest` de ICP si
+    funciona, es solo el ratio L/S. Nueva `datos.SinDatoParaSimbolo`
+    (subclase de `ValueError`) que `long_short_ratio()` levanta cuando
+    detecta el codigo 40054 en el mensaje; `_actualizar_ls_ratio()` la
+    captura, avisa UNA vez ("no se volvera a pedir en esta sesion") y
+    termina la tarea en vez de reintentar cada `ls_ratio_cada` para
+    siempre - la columna queda en blanco (mismo criterio de "blanco si no
+    hay dato" de siempre), sin el ruido de log infinito. Se reintenta de
+    cero en el siguiente arranque o si la moneda se quita/anade en
+    caliente - por si Bitget empieza a publicarlo mas adelante. Cubre
+    cualquier otra moneda que caiga en el mismo caso, no solo ICP.
+    Verificado contra la API real: ICP levanta `SinDatoParaSimbolo`,
+    BTC/ETH siguen devolviendo valor normal (sin regresion).
+  - **`mercado/__init__.py` y `alertas/__init__.py` eliminados** (decision
+    de Fran) - eran solo un comentario de una linea cada uno, sin
+    `__all__` ni logica. No hacian falta: `herramientas/` ya funcionaba
+    sin `__init__.py` desde antes (namespace package implicito de Python,
+    PEP 420, sin necesidad de marcar el directorio como paquete regular) -
+    verificado copiando `datos.py`/`flujo.py` a una carpeta sin
+    `__init__.py` y confirmando que `from mercado import datos, flujo`
+    (el mismo import de `grabador_libro.py`) sigue funcionando igual.
+  - **Reconexion por lanzamiento** (peticion de Fran, tras confirmar que un
+    `kill -INT`+relanzar NO recuperaba el hueco: "hay que valorar tambien
+    la reconexion por lanzamiento"): antes, `_recuperar_hueco()` SOLO se
+    disparaba desde `_watch_book()` con el proceso ya corriendo - un
+    reinicio (planificado con `kill -INT`, o un crash, o un reinicio del
+    NAS) perdia el tramo entre la ultima fila escrita y el arranque
+    siguiente en silencio, sin pasar por `huecos_<COIN>.csv` ni intentar
+    nada por REST. Nuevo `cursor_<COIN>.json` por moneda (en
+    `herramientas/grabador_libro/`, gitignorado igual que el resto de la
+    carpeta) con `ultimo_trade_ts` + los `id` de los trades EN ese
+    milisegundo (no solo el timestamp - necesario para no perder la
+    proteccion de empate al sembrar `ids_recientes` en el arranque
+    siguiente), persistido en CADA fila (misma cadencia que el CVD, para
+    que ambos queden siempre consistentes entre si sin necesitar un hook
+    de cierre limpio aparte). `_iniciar_coin()` siembra el estado desde
+    ese cursor al arrancar; nueva tarea `_recuperar_al_arrancar()` llama a
+    `_recuperar_hueco()` una vez, reusando tal cual el mismo tope de 5
+    minutos y el mismo registro en `huecos_<COIN>.csv` que ya cubria los
+    cortes de WS en caliente - un reinicio pasa a tratarse exactamente
+    igual. Sin cursor previo (primera vez, o un reinicio tan viejo que
+    nunca llego a escribir una fila con el codigo nuevo) no intenta nada,
+    igual que antes. Verificado simulando "morir" (procesar trades,
+    guardar cursor) y "arrancar" (sembrar estado, recibir un lote de REST
+    con un trade duplicado del ultimo ms + uno nuevo del MISMO ms + uno
+    posterior) con las funciones reales: el duplicado se descarta por id,
+    los dos nuevos se cuentan, CVD final exacto.
+
+  Prueba en vivo real, ya con todo lo de arriba aplicado (Fran paro
+  22800, relanzo como 31165, desconecto el NAS de la red unos segundos y
+  reconecto): las tres monedas dispararon `_recuperar_hueco()` y quedaron
+  registradas en `huecos_<COIN>.csv` sin errores. BTC (0.4s) y ETH (1.4s)
+  salieron `sin_datos_nuevos` - coherente con que `_watch_trades()` (tarea
+  WS independiente de `_watch_book()`) ya hubiera contado esos trades en
+  vivo al reconectar, antes de que la recuperacion REST llegara a mirarlos
+  (el dedup por `id` los descarta correctamente como "ya vistos", no es un
+  fallo). ICP salio 156.3s, mismo estado - pero NO porque el corte fuera
+  mas largo para ICP (comparten la misma conexion WS que BTC/ETH): su
+  `ts_ultimo_trade_previo` era ~155s mas viejo que el de BTC/ETH, es decir,
+  ICP ya llevaba ~155s sin operar ANTES del corte real (Fran: "icp tiene
+  muy poco movimiento"). `duracion_seg` mide tiempo desde el ULTIMO TRADE,
+  no duracion real del corte de red - en una moneda poco liquida queda
+  inflado por la calma del mercado, no por el corte. Efecto secundario
+  identificado y NO arreglado todavia: `TOPE_HUECO_SEG=300s` usa esta
+  misma medida para decidir si intenta recuperar - si ICP lleva >5min sin
+  operar, la proxima vez que se dispare CUALQUIER hueco de libro (aunque
+  el corte real sea de 1 segundo) el codigo lo clasificaria como "hueco
+  grande" y ni lo intentaria, no por el corte sino por la calma del
+  mercado. Pendiente de decidir si merece la pena separar el criterio del
+  tope del que se usa para la ventana de recuperacion.
 
 - 2026-08-12: Auditoria de "algebra" (formulas/calculos) sobre todo el
   proyecto a peticion de Fran ("el algebra completo de los py, calculos,
@@ -176,8 +289,8 @@
     corto (no se puede "editar" un mensaje hacia varios).
   - `mercado/contrato.py._leer_funding_rate()` era un stub que devolvia
     `None` siempre ("CCXT puede no tener esto, por ahora") - relevante
-    porque el diseño ya acordado de la Cartera Simulada (PENDIENTES.md,
-    cabecera de `marcador_tpsl.py`) dice "que lea contrato para comisiones
+    porque el diseño ya acordado de la Cartera Simulada (cabecera de
+    `marcador_tpsl.py`) dice "que lea contrato para comisiones
     y funding". Ahora reusa `mercado.datos.funding_rate()` (implementacion
     real via `fetch_funding_rate` de ccxt, ya en uso por
     `grabador_libro.py`) en vez de duplicar/dejar sin hacer.
@@ -562,7 +675,7 @@
   El shell del DSM es busybox/ash - no tiene `pgrep` (usar `ps | grep
   grabador_libro` o `kill -0 <pid>` para chequear si sigue vivo). Sigue
   pendiente formalizarlo como tarea programada de DSM con guardia `pgrep`
-  (ver PENDIENTES.md).
+  - sigue sin configurarse (ver `ESTADO.md`).
 
 - 2026-08-07: `grabador_libro.py` baja/actualiza velas de Bitget en
   `TIMEFRAMES_VELAS = ["1m", "5m", "15m", "30m", "1h", "4h"]` para cada

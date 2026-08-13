@@ -170,6 +170,18 @@ def trades(simbolo, desde=None, limite=500):
     except Exception as e:
         raise ValueError(f"Error trayendo trades {simbolo}: {e}")
 
+class SinDatoParaSimbolo(ValueError):
+    """El exchange respondio explicitamente 'sin datos' para este simbolo en
+    este endpoint (ej. Bitget 40054, 'the data fetched by X is empty') - NO
+    es un fallo transitorio (red, rate limit, mercado caido), es que el dato
+    no existe de forma estructural para ese simbolo (visto en la practica:
+    Bitget no calcula long/short ratio para ICPUSDT, aunque si para BTCUSDT/
+    ETHUSDT - probablemente por volumen/interes abierto insuficiente).
+    Quien llama puede dejar de reintentar en vez de tratarlo como un error
+    momentaneo que se vaya a resolver solo."""
+    pass
+
+
 def long_short_ratio(simbolo, timeframe='1h'):
     """Ratio agregado de cuentas en largo vs en corto del mercado (NO tu
     propia posicion) - posicionamiento del mercado de derivados, endpoint
@@ -186,6 +198,11 @@ def long_short_ratio(simbolo, timeframe='1h'):
 
     Returns:
         float o None: longShortRatio (>1 = mas cuentas en largo que en corto).
+
+    Raises:
+        SinDatoParaSimbolo: Bitget devolvio el codigo 40054 (sin datos para
+            este simbolo) - ver la clase para el motivo de separarlo del
+            resto de errores.
     """
     cliente = _init_cliente()
     try:
@@ -194,5 +211,7 @@ def long_short_ratio(simbolo, timeframe='1h'):
             return None
         return serie[-1].get('longShortRatio')
     except Exception as e:
+        if '"code":"40054"' in str(e):
+            raise SinDatoParaSimbolo(f"Bitget no publica long/short ratio para {simbolo}: {e}")
         raise ValueError(f"Error obteniendo long/short ratio {simbolo}: {e}")
 
