@@ -15,6 +15,11 @@ herramientas/libro/
 historico_*.csv
 flujo_*.csv
 
+# 2026-08-13: grabador_libro.py escribe ahora en su propia carpeta (locks,
+# config, comandos_grabador/, huecos_*.csv) en vez de compartir
+# herramientas/libro/ - mismo criterio de "se regenera en vivo, no se sube".
+herramientas/grabador_libro/
+
 # Cache de historicos completos (Binance, 2017+) - GBs de datos (nombre
 # real: <DD-MM-AA>_<COIN>_<TF>_binance.csv, sin prefijo "historico_" - por
 # eso necesita su propio patron, el de arriba no lo cubre). Vive en

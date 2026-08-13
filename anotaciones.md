@@ -1,5 +1,92 @@
 # Anotaciones
 
+- 2026-08-13: `grabador_libro.py` reescrito de polling REST sincrono a
+  WebSocket (Bitget v2, via `ccxt.pro`) - motivado directamente por los dos
+  bugs reales de CVD de esta sesion (dedup por timestamp del 2026-08-12, y
+  el `KeyError('cursor_ids')` encontrado en la auditoria previa al
+  reinicio ese mismo dia), ambos originados en la complejidad de mantener
+  un cursor de paginacion sobre `fetch_trades`. Con WS cada trade llega
+  empujado UNA vez, sin paginar - se elimina esa complejidad en el caso
+  normal.
+
+  Decisiones tomadas razonando en conversacion y verificando en vivo con
+  un script de prueba aparte (`herramientas/_prueba_ws_bitget.py`, borrado
+  tras la verificacion):
+  - Canal de libro `books50` da error Bitget 30016 "Param error" en
+    USDT-FUTURES (solo existe para spot, no se sabia hasta probarlo en
+    vivo) - se usa el canal `books` incremental SIN limite, cuyo checksum
+    CRC32 gestiona `ccxt.pro` por dentro (no hay que implementarlo a
+    mano). Da MUCHOS mas niveles de los esperados: 500 en BTC/ETH, 200 en
+    ICP, verificado en vivo - se guardan TODOS por defecto (Fran:
+    "guardemos todo ya que lo tenemos").
+  - Funding rate y open interest pasan de REST cacheado a canal `ticker`
+    (empuja solo, sin necesidad de espaciar peticiones) - el parametro
+    `--funding-cada` desaparece por completo, ya no tiene funcion.
+  - Long/short ratio SIGUE por REST (Bitget no lo transmite en directo, es
+    un calculo periodico) - unico dato que sigue siendo poll, ahora via
+    `loop.run_in_executor` para no bloquear el event loop mientras espera
+    la respuesta HTTP.
+  - UN SOLO PROCESO/conexion para todas las monedas (antes: un proceso por
+    moneda con lock propio, decision del 2026-08-12) - Bitget soporta
+    nativamente suscribir varias monedas en un mismo mensaje y anadir/
+    quitar en caliente sobre la misma conexion (confirmado en vivo). El
+    aislamiento que antes daba gratis el SO (un fallo de una moneda no
+    tumbaba las demas) se reconstruye a mano: cada moneda tiene sus
+    propias tareas asyncio con su propio try/except.
+  - Recuperacion acotada de huecos: al detectar (via el "latido" del
+    libro, que en la prueba actualizaba decenas de veces por segundo) que
+    ha pasado mas de 15s sin actualizacion, se asume un corte de WS y se
+    intenta rellenar los trades perdidos por REST (misma funcion
+    `mercado.datos.trades()` ya probada) - acotado a 5 minutos y a un
+    numero maximo de llamadas/trades, porque Bitget "no tiene historico
+    profundo garantizado" (ver `mercado/datos.py.trades()`). Se registra
+    SIEMPRE en `huecos_<COIN>.csv`, se recupere o no, para poder consultar
+    en operaciones "¿ha habido algun hueco sin recuperar recientemente?"
+    antes de fiarse de una señal - mismo espiritu que la zona de
+    indecision que ya usa el proyecto para niveles/señales (Fran: "si no
+    creemos que los datos estan correctos, esperar para operar un poco
+    mas").
+  - Cada script pasa a escribir en su PROPIA carpeta dentro de
+    `herramientas/` (Fran: "cada py que lanzamos escriba en una carpeta,
+    grabador_libro.py en herramientas/grabador_libro") - ya no comparte
+    `herramientas/libro/` con `descargar_bit.py`/los monitores.
+    `monitor_comun.py._localizar_csv_libro`/`_requerir_grabador_libro` se
+    actualizaron para buscar ahi; `marcador_tpsl.py`/`verificar_flujo.py`
+    no necesitaron tocarse (usan esas funciones/`_archivo` importada, no
+    rutas a mano). Efecto colateral util: los `flujo_*.csv` viejos en
+    `herramientas/libro/` quedan intactos sin tocarlos - ya sirven de
+    "copia de antes del cambio" sin necesidad de archivarlos a mano.
+  - Verificado en vivo antes de escribir el codigo final: reconexion
+    automatica y silenciosa de `ccxt.pro` tras un corte de red real de
+    56s (sin ningun error, retoma exactamente donde lo dejo); anadir/
+    quitar moneda en caliente sobre la misma conexion sin reconectar (ICP
+    anadida, ETH quitada, ambas limpias). Contraste con la version REST:
+    durante el mismo corte, `flujo_*.csv` REST siguio escribiendo fila
+    cada `--cada` segundos con los campos en blanco (sin crash, CVD
+    congelado) - ese mismo criterio honesto ("blanco si el dato no es
+    fresco, no repetir el ultimo valor conocido") se traslado al diseño
+    WS.
+
+  Dos bugs propios encontrados y arreglados durante la implementacion
+  (antes de tocar produccion):
+  - Doble bloqueo: `_bloquear_instancia_unica` escribia los locks al
+    arrancar Y `_iniciar_coin` volvia a intentar adquirirlos - el proceso
+    se rechazaba a si mismo con "ya hay un grabador_libro.py corriendo"
+    para las 3 monedas, en la primera prueba en vivo. Arreglado:
+    `_bloquear_instancia_unica` pasa a ser solo la comprobacion previa (no
+    escribe nada), `_iniciar_coin` es el unico sitio que adquiere el lock
+    de verdad.
+  - Los niveles del libro de `ccxt.pro` (canal incremental) llevan un
+    TERCER elemento interno por nivel (el par crudo en string, para el
+    checksum, ver `ccxt/pro/bitget.py.handle_delta`) - `mercado/flujo.py`
+    no se ve afectado (accede por indice [0]/[1]), pero se limpia antes de
+    guardar en `bids_json`/`asks_json` para no persistir ese elemento
+    redundante ni casi doblar el tamaño del JSON sin necesidad.
+
+  Estado al cerrar la sesion: lanzado en paralelo con los 3 procesos REST
+  de siempre (btc/eth/icp, PIDs 18047/18048/18049 sin tocar) para comparar
+  unos minutos antes de cortar a produccion - ver PENDIENTES.md.
+
 - 2026-08-12: Auditoria de "algebra" (formulas/calculos) sobre todo el
   proyecto a peticion de Fran ("el algebra completo de los py, calculos,
   pruebas... etc"), tras el repaso de inconsistencias estructurales de la

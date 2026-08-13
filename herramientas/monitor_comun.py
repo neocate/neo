@@ -25,7 +25,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from herramientas.grabador_libro import CAMPOS_CSV as CAMPOS_LIBRO
+from herramientas.grabador_libro import CAMPOS_CSV as CAMPOS_LIBRO, DIR_GRABADOR
 from herramientas.descargar_bit import DIR_LIBRO
 
 CAMPOS_AVISOS = ["timestamp_ms", "fecha_utc", "coin", "evento", "tipo", "origen",
@@ -44,24 +44,25 @@ def _flt(s):
 
 
 def _localizar_csv_libro(coin):
-    """Busca en herramientas/libro/ el CSV de grabador_libro.py vigente para
-    esta moneda - normalmente flujo_<COIN>.csv (un fichero por moneda desde
-    2026-08-12, ver grabador_libro.py._archivo). El patron tambien acepta
-    los formatos viejos (flujo_<MONEDA1-MONEDA2>.csv sin fecha, o con fecha
-    delante, de antes de esos cambios) por si queda algun fichero de
+    """Busca en herramientas/grabador_libro/ (2026-08-13: carpeta propia,
+    antes compartida en herramientas/libro/) el CSV de grabador_libro.py
+    vigente para esta moneda - normalmente flujo_<COIN>.csv (un fichero
+    por moneda desde 2026-08-12, ver grabador_libro.py._archivo). El
+    patron tambien acepta los formatos viejos (flujo_<MONEDA1-MONEDA2>.csv
+    sin fecha, o con fecha delante) por si queda algun fichero de
     entonces. Si hay varios candidatos (_v2/_v3 por cabecera cambiada, o
     restos del formato viejo conviviendo con el nuevo), toma el modificado
     mas reciente. None si no encuentra ninguno."""
-    if not os.path.isdir(DIR_LIBRO):
+    if not os.path.isdir(DIR_GRABADOR):
         return None
     candidatos = []
-    for nombre in os.listdir(DIR_LIBRO):
+    for nombre in os.listdir(DIR_GRABADOR):
         m = re.match(r"^flujo_(?:\d+_)?(.+?)(?:_v\d+)?\.csv$", nombre)
         if not m:
             continue
         monedas = m.group(1).split("-")
         if coin.upper() in monedas:
-            ruta = os.path.join(DIR_LIBRO, nombre)
+            ruta = os.path.join(DIR_GRABADOR, nombre)
             candidatos.append((os.path.getmtime(ruta), ruta))
     if not candidatos:
         return None
@@ -207,16 +208,15 @@ def _pid_vivo(pid):
 
 def _requerir_grabador_libro(coin):
     """True si hay un grabador_libro.py vivo para 'coin' - comprueba el
-    lock DIR_LIBRO/grabador_libro_<COIN>.lock (por moneda, ver
-    grabador_libro._bloquear_instancia_unica) y que el PID de dentro siga
-    vivo (ver _pid_vivo). NO se puede comprobar con
-    _proceso_corriendo(["grabador_libro.py", coin]): si se lanzo combinado
-    ("grabador_libro.py btc,eth"), la moneda no aparece como token suelto
-    en la linea de comando tal cual se escribio - el lock, en cambio, es
-    siempre por moneda, se lance como se lance (y Fran ha confirmado que a
-    partir de ahora lanza cada moneda como proceso independiente, lo que
-    hace este chequeo aun mas fiable)."""
-    ruta_lock = os.path.join(DIR_LIBRO, f"grabador_libro_{coin.upper()}.lock")
+    lock DIR_GRABADOR/grabador_libro_<COIN>.lock (2026-08-13: carpeta
+    propia, ver grabador_libro._bloquear_instancia_unica) y que el PID de
+    dentro siga vivo (ver _pid_vivo). NO se puede comprobar con
+    _proceso_corriendo(["grabador_libro.py", coin]): con el proceso
+    consolidado (una sola conexion WS para varias monedas, 2026-08-13) la
+    moneda ni siquiera tiene por que aparecer en la linea de comando de
+    arranque si se añadio despues en caliente - el lock, en cambio, es
+    siempre por moneda, se cubra como se cubra."""
+    ruta_lock = os.path.join(DIR_GRABADOR, f"grabador_libro_{coin.upper()}.lock")
     if not os.path.exists(ruta_lock):
         return False
     try:

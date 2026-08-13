@@ -1,5 +1,20 @@
 # Pendientes
 
+- **Reescritura WS de `grabador_libro.py`** (ver `anotaciones.md`
+  2026-08-13): lanzada en paralelo con la version REST de siempre para
+  comparar `herramientas/grabador_libro/flujo_*.csv` contra
+  `herramientas/libro/flujo_*.csv` unos minutos. Pendiente: confirmar que
+  coinciden, parar los 3 procesos REST (PIDs 18047/18048/18049) y dejar la
+  version WS como unico proceso en produccion.
+
+- **Menu de Telegram para ajustar `grabador_libro.py`**: el backend de
+  ajuste en caliente (`comandos_grabador/`, parametros + reset) ya existe,
+  y con la reescritura WS se ampliaron 3 comandos mas (`anadir_coin`/
+  `quitar_coin`/`reiniciar_coin`). `telegram_control.py` todavia no tiene
+  ningun menu para dispararlos - aparcado a peticion de Fran el
+  2026-08-13 ("telegram dejalo para luego... me da igual que quede sin
+  ajustar").
+
 - **Tarea programada de DSM (Programador de tareas)**: confirmado
   2026-08-07 que la opción EXISTE en el DS423 (Synology DSM) — no se
   verificó ni se configuró todavía, solo se comprobó que está disponible.
