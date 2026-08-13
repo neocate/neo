@@ -1,5 +1,226 @@
 # Anotaciones
 
+- 2026-08-13: Auditoria de datos del Grupo A (`mercado/senales.NIVEL_UTIL_GRUPO_A`/
+  `REFINADAS_CONFIRMADAS`) a peticion de Fran, motivada por ver en vivo que
+  `ruptura_alza_en_resistencia` salia floja en una muestra de ~36h
+  (ver entrada de auditoria de resultados en vivo, mas abajo) y por la
+  sospecha de que la seleccion original (backtest 2018-2022) "se hizo
+  arbitraria". Con `backtest_senales.py` sobre los 8 años de `historicos/`
+  (BTC+ETH, 2017-2026, todos los TF) ya disponibles en local:
+
+  - **Barrido de `--dias-niveles-previos` (45/90/180/365d), BTC+ETH 15m,
+    2022-2024**: no hay evidencia de que 90 dias sea insuficiente - de
+    hecho, para `ruptura_alza_en_resistencia` (la unica que se sostiene,
+    ver abajo) el edge se DILUYE segun crece la ventana (BTC: +0.072 con
+    45d -> +0.010 con 365d). Mas historia no ayuda, empeora ligeramente -
+    coherente con el hallazgo ya documentado de `rsi_sobreventa` cambiando
+    de signo entre regimenes (niveles de un regimen viejo pesan menos, no
+    mas, cuanto mas lejos quedan). Conclusion: 90d (el actual) sigue siendo
+    razonable, no hace falta subirlo.
+
+  - **De las 4 `REFINADAS_CONFIRMADAS`, solo `ruptura_alza_en_resistencia`
+    sobrevive fuera de la ventana 2018-2022 que las valido.** Mirando
+    `edge_cont@30` (el contexto "contrario" que es la base del filtro de
+    Grupo A) en 6 combinaciones coin/TF (BTC+ETH, 15m/1h/4h, todas sobre
+    2022-2024): `ruptura_alza_en_resistencia` sale POSITIVA en las 6 sin
+    excepcion (+0.067 a +1.621 segun TF). Ninguna otra se acerca:
+    `aceleracion_baja_en_soporte` negativa en 5 de 6; `rechazo_max_en_soporte`
+    y `ruptura_baja_en_soporte` cambian de signo entre TF/moneda sin
+    patron - ruido, no edge real.
+
+  - **Barrido de horizontes (5/10/15/20/30/45/60 velas), BTC+ETH 15m**:
+    ningun horizonte "rescata" a las 3 debiles (`aceleracion_baja_en_soporte`
+    negativa en 13 de 14 puntos BTC+ETH combinados; `rechazo_max_en_soporte`
+    negativa en 12 de 14). `ruptura_alza_en_resistencia` en cambio es
+    POSITIVA en los 14 puntos sin excepcion, Y el edge CRECE con el
+    horizonte (maximo en @60, no en @30 que es el que usa hoy
+    `marcador_tpsl.py`) - candidata a revisar su horizonte de confirmacion
+    ademas de mantenerla.
+
+  - **Auditoria de asimetria alza/baja** (Fran: "ruptura_alza_en_resistencia
+    y ruptura_baja_en_soporte deberian de salir parecidas, puedes comprobar
+    el archivo"): revisadas las 4 piezas donde podria colarse un bug -
+    `senales._ruptura()` (linea 131, `>max_previo`/`<min_previo` espejo
+    exacto), `niveles_soporte._evaluar_estado()` (linea 154, mismo
+    `confirmacion_velas` para techo/suelo), la clasificacion favorable/
+    contrario de `backtest_senales._backtest()` (linea 299, simetrica por
+    `direccion`), e `indicadores.extremos_locales()` (mismo `k` a cada
+    lado). Sin bug encontrado - las 4 son espejo exacto en codigo. Tamaños
+    de muestra tambien comparables entre alza/baja (mismo orden de
+    magnitud). La divergencia de resultados es real (o al menos no es un
+    artefacto de calculo) - hipotesis mas probable, sin poder probarla del
+    todo: asimetria de mercado conocida (rupturas a la baja mas bruscas/
+    rapidas por cascadas de stop-loss, continuacion alcista mas sostenida),
+    pero podria seguir siendo ruido residual con n~500-600.
+
+  - **Confirmado: `niveles_soporte.py` y `mercado/senales.py` son modulos
+    independientes** (Fran preguntó antes de tocar codigo: "niveles toca
+    señales?") - `niveles_soporte.py` solo importa `mercado.indicadores` y
+    `descargar_bit._archivo`, cero referencia a `mercado.senales` (las 3
+    menciones que salen en un grep son comentarios, no imports). La
+    conexion entre ambos vive solo en los ficheros que importan los dos
+    (`monitor_senales.py`, `backtest_senales.py`, `validador_niveles.py`).
+    Consecuencia practica: reducir el Grupo A en `mercado/senales.py` no
+    toca `niveles_soporte.py` para nada.
+
+  - **Bug encontrado y arreglado de paso**: `backtest_senales._cargar_velas()`
+    (linea 124) no se protegia contra filas vacias/incompletas -
+    `historicos/05-08-26_ETH_4h_binance.csv` traia un `\r` suelto como
+    ultima linea (artefacto de la descarga) y tumbaba el backtest con
+    `IndexError`. Arreglado con guardia `if len(row) < 7: continue`. Fran
+    resolvio el origen re-descargando el fichero por FileZilla; el guardia
+    en el codigo queda igual por si vuelve a pasar con otro fichero.
+
+  - **PENDIENTE, sin implementar todavia**: aplicar en `mercado/senales.py`
+    la reduccion del Grupo A a solo `ruptura_alza_en_resistencia` (sacar
+    `aceleracion_baja_en_soporte`/`rechazo_max_en_soporte`/
+    `ruptura_baja_en_soporte` de `REFINADAS_CONFIRMADAS`), revisando de
+    paso si el horizonte de confirmacion deberia subir de 30 a algo mas
+    cercano a 60. Afecta a `REFINADAS_CONFIRMADAS`/`REFINADAS_EN_PRUEBAS`
+    y a quien las consume: `monitor_senales.py`, `monitor_telegram.py`
+    (que decide que se manda por Telegram), `validador_niveles.py`,
+    `telegram_control.py`. Se decidio el alcance pero no se ha tocado
+    codigo todavia.
+
+- 2026-08-13: Auditoria de resultados en vivo del `grabador_libro.py` REST
+  antiguo (PIDs 18047/18048/18049, dejados corriendo a proposito para
+  comparar contra la reescritura WS antes de cortar a produccion, ver
+  entrada de la reescritura WS) - datos accedidos directo desde
+  `D:\neocat\neo\herramientas\libro` (carpeta compartida por red, sin SSH).
+
+  - **Comparacion REST vs WS en la misma ventana solapada (~3.5h)**: WS
+    captura sensiblemente MAS trades que REST en las 3 monedas (BTC +32%,
+    ETH +14%, ICP +17%) - coherente con el motivo de la reescritura. El
+    CVD neto del periodo salio con signo OPUESTO entre REST y WS en las 3
+    monedas a la vez - se investigo por si era un bug de lado buy/sell
+    invertido en el WS: NO lo es (se comprobo que el signo de `delta_vol`
+    coincide con la direccion real del precio fila a fila, 66-88% en
+    ambas versiones, practicamente igual) - es que el CVD es un residuo
+    NETO pequeño sobre un volumen bruto mucho mayor, muy sensible a que
+    trades exactos entran en la muestra, y REST se deja una parte real
+    (limite de 500 trades por sondeo de 15s).
+  - **Validacion de `avisos_*.csv`/`senales_*.csv` contra las velas reales
+    descargadas** (Fran, tras notar que la frescura de los ficheros no
+    prueba que sean "en vivo" de verdad, son FileZilla manual, no una
+    conexion continua - correccion aceptada, no se debio decir "ahora
+    mismo" sin verificarlo): comparado el `precio_actual` de cada aviso
+    contra el rango [low,high] real de su vela (Bitget, mismo exchange)
+    -> 52/53 coinciden (98%+), el unico desajuste es de 0.02% (ruido). Los
+    "sin vela" resultaron ser todos de la vela EN CURSO (nunca grabada a
+    proposito por `descargar_bit.py`), no huecos reales. BTC no se pudo
+    validar reciente porque su feed de velas lleva parado desde el
+    2026-08-12 18:06 (ya documentado, `descargar_bit.py --feed` no cubre
+    BTC).
+  - **`tpsl_*.csv` (marcador_tpsl.py) win-rate en vivo**: ETH 15m 38.5%
+    (n=13), ICP 15m 58.3% (n=12) - muestra demasiado pequeña para
+    significar nada (~36h de proceso), coherente con la propia cabecera
+    del fichero ("cazar mosquitos con cañones, no tenemos datos
+    suficientes"). Señales puras (sin TP/SL, retorno simple a N velas
+    contra velas reales) igual de pequeñas (n=1 a n=12) - unico dato algo
+    mas solido: `ruptura_alza_en_resistencia` salio 0/5 a 15 y 30 velas en
+    esta ventana concreta, lo que motivo la auditoria de datos completa de
+    la entrada de arriba (con datos de sobra, no n=5).
+  - **Profundidad historica real en Binance para grabador_libro-like data**
+    (comprobado con llamadas reales a ccxt, `binanceusdm`, no de memoria -
+    Fran: "puedes comprobar en cctx"): funding rate SI tiene historia
+    profunda de verdad (`fetchFundingRateHistory` probado hasta 730 dias
+    atras, funciona) - candidato real a señal backtesteable en serio. Open
+    interest y long/short ratio solo ~30 dias (`fetchOpenInterestHistory`/
+    `fetchLongShortRatioHistory` fallan con error explicito de Binance,
+    `"startTime is invalid"`, mas alla de eso). Trades (para reconstruir
+    CVD historico) practicamente nada - `fetchTrades` con `since` de mas
+    de ~2 dias da error explicito `"Search window is restricted to recent
+    2 days only"`. Libro de ordenes: ninguna profundidad en ningun
+    exchange, es dato de "ahora mismo" por definicion. Conclusion: una
+    señal basada en CVD/imbalance de libro NO se puede backtestear como
+    las 12 actuales (necesitan acumularse en vivo, meses); una basada en
+    funding rate SI podria validarse con años de historia real, igual que
+    las de vela.
+  - **PENDIENTE sin decidir**: cerrar los 3 procesos REST viejos
+    (`kill -INT 18047 18048 18049`) y que hacer con sus ficheros propios en
+    `herramientas/libro/` (`flujo_BTC/ETH/ICP.csv`, `flujo_BTC-ETH.csv`,
+    los 3 `.lock`) - Fran pidio "eliminarlos" pero el borrado de ficheros
+    no se ha ejecutado (fuera del alcance de lo que se hace sin
+    confirmacion explicita cada vez) ni se ha decidido entre borrar de
+    verdad o archivar a un lado (mismo patron que `.git.corrupto-20260807/`).
+    El resto de `herramientas/libro/` (`avisos_*`/`confirmaciones_*`/
+    `historico_*`/`senales_*`/`tpsl_*`) NO se toca, pertenece a otros
+    procesos que siguen en produccion.
+
+- 2026-08-13: Sesion de diseño (sin codigo todavia) sobre como reorganizar
+  Telegram y sobre un futuro supervisor de la cascada de procesos - los tres
+  puntos siguientes quedan PENDIENTES, documentados aqui porque
+  `PENDIENTES.md` ya no existe (ver entrada de auditoria mas abajo, mismo
+  dia).
+
+  - **Telegram, reparto de responsabilidades acordado** (Fran: "usaremos el
+    formato de una responsabilidad por accion, reutilizaremos la carpeta
+    alertas"): hoy `telegram_control.py` (406 lineas) mezcla mecanica cruda
+    de la API de Telegram, los comandos de consulta (`cmd_estado`/
+    `cmd_confirmadas`/`cmd_confirmaciones`/`cmd_tpsl`/`cmd_resumen`), los
+    menus/teclados y el bucle de `getUpdates`+routing, todo en un fichero.
+    Reparto acordado (sin implementar todavia):
+    - `alertas/telegram_api.py` (nuevo): mecanica cruda compartida -
+      `getUpdates`, `sendMessage`/`editMessageText`/`answerCallbackQuery`,
+      troceo por limite de caracteres, teclados inline. `alertas/avisos.py`
+      se queda como esta (enviar() de un solo mensaje, lo siguen usando
+      monitor_niveles.py/monitor_telegram.py).
+    - `herramientas/telegram_grabador.py` (nuevo): unico modulo con
+      ESCRITURA - comandos de `grabador_libro.py` (ver `DIR_COMANDOS`/
+      `_procesar_comandos` en `grabador_libro.py`: anadir/quitar/reiniciar
+      moneda en caliente, ajustar un parametro con los mismos limites de
+      `LIMITES_PARAMS`, reset) via el mismo mecanismo de fichero .json que
+      ya existe, sin hablar con el proceso directamente.
+    - `herramientas/telegram_comandos.py` (nuevo): los `cmd_*` de SOLO
+      LECTURA que ya existen (confirmadas/confirmaciones/tpsl/estado),
+      movidos tal cual.
+    - `herramientas/telegram_control.py` (recortado): solo bucle de
+      `getUpdates` + persistencia de offset + menus/teclados + routing -
+      cada submenu delega en su propio modulo sin que se conozcan entre si
+      (Fran: "no todo en un solo menu, cada submenu un sistema
+      independiente").
+    - **Alcance decidido para AHORA**: solo `grabador_libro.py` tiene
+      cambio en caliente real (es el unico que ya tiene `DIR_COMANDOS`).
+      `monitor_niveles.py`/`monitor_senales.py`/`validador_niveles.py`/
+      `marcador_tpsl.py` se quedan en solo lectura por Telegram, igual que
+      hoy - Fran: "de momento solo grabador, vamos a reconstruir todo lo
+      demas... si es mejor hacerlo luego lo hacemos luego, si se puede ir
+      creando se crea". Dar a esos cuatro su propio `DIR_COMANDOS` (mismo
+      patron que `grabador_libro.py`) queda pendiente para cuando se
+      reconstruyan.
+  - **`monitor_comun.py` mezcla dos responsabilidades** (detectado al
+    repasarlo para el reparto de arriba, no arreglado todavia): "leer el
+    flujo en vivo" (`_flt`/`_localizar_csv_libro`/`_tail_csv`/
+    `_ultima_fila_coin`) y "comprobar cascada de dependencias vivas"
+    (`_listar_procesos`/`_proceso_corriendo`/`_pid_vivo`/
+    `_requerir_grabador_libro`/`_requerir_feed_velas`) - conviven en un
+    fichero porque las usan los mismos consumidores
+    (`monitor_niveles.py`/`monitor_senales.py`), pero la parte de
+    "cascada" tambien la usan `validador_niveles.py`/`marcador_tpsl.py` y,
+    por separado, `telegram_control.py` tiene su PROPIO parseo de
+    `ps -ef` sin reusar `_listar_procesos()` (duplicacion ya detectada en
+    `ESTADO.md`, sin arreglar). Candidato a partirse en dos modulos cuando
+    se reconstruyan los monitores, mismo criterio "una responsabilidad por
+    accion" que Telegram.
+  - **Supervisor de la cascada de procesos, aparcado para mas adelante**
+    (Fran: "vamos a dejarlo para cuando tengamos el proyecto mas
+    adelantado"): la idea es sustituir/complementar la autocomprobacion de
+    cada script al arrancar (cadena "avisa y para" del 2026-08-12) por una
+    tarea del Programador de DSM que revise periodicamente toda la cascada
+    y relance lo que falte, en el orden correcto - motivado por el propio
+    incidente de esta sesion (nadie se entero de que faltaba relanzar
+    `grabador_libro.py` hasta comprobarlo a mano). Puntos ya discutidos
+    para cuando se aborde: (1) config declarativo del "estado deseado"
+    (que combos coin/tf DEBERIAN estar vivos), no inferido de lo que ya
+    esta corriendo; (2) reusar los mismos `.lock`/PID que ya existen para
+    detectar "ya esta vivo", nunca reinventar la deteccion (motivo de dos
+    incidentes reales de corrupcion de CVD en este proyecto); (3) verificar
+    en vivo que los procesos que lance el supervisor sobreviven al fin de
+    la propia tarea programada de DSM (equivalente real a `nohup ... &`,
+    no dado por hecho); (4) frecuencia moderada (5-10 min); (5) sin decidir
+    todavia si la autocomprobacion de cada script se mantiene como red de
+    seguridad ademas del supervisor, o se retira.
+
 - 2026-08-13: `grabador_libro.py` reescrito de polling REST sincrono a
   WebSocket (Bitget v2, via `ccxt.pro`) - motivado directamente por los dos
   bugs reales de CVD de esta sesion (dedup por timestamp del 2026-08-12, y

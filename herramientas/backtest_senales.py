@@ -133,6 +133,9 @@ def _cargar_velas(ruta, desde_ms=None, hasta_ms=None):
         r = csv.reader(f)
         next(r)  # cabecera
         for row in r:
+            if len(row) < 7:
+                continue  # linea vacia/incompleta (visto en la practica: un
+                           # '\r' suelto al final de un CSV de historicos/)
             ts = int(row[0])
             if desde_ms is not None and ts < desde_ms:
                 continue
