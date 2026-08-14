@@ -28,14 +28,14 @@ def _mejor(niveles):
 
 
 def mid(libro):
-    """Precio medio entre el mejor bid y el mejor ask. None si falta un lado."""
+    """Precio medio entre el mejor bid y el mejor ask. None si falta un lado o el libro esta cruzado."""
     if not isinstance(libro, dict):
         return None
 
     bid = _mejor(libro.get('bids'))
     ask = _mejor(libro.get('asks'))
 
-    if not bid or not ask:
+    if not bid or not ask or ask[0] < bid[0]:  # libro cruzado, mismo guard que spread_bps
         return None
 
     return (bid[0] + ask[0]) / 2.0
@@ -113,7 +113,7 @@ def microprecio(libro):
     bid = _mejor(libro.get('bids'))
     ask = _mejor(libro.get('asks'))
 
-    if not bid or not ask:
+    if not bid or not ask or ask[0] < bid[0]:  # libro cruzado, mismo guard que spread_bps
         return None
 
     pb, vb = bid[0], bid[1]
