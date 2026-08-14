@@ -16,7 +16,7 @@
 # rango macro (mismo criterio que valida herramientas/backtest_senales.py -
 # "sin --tf-macro en esto, igual que el backtest que lo valido"). Tampoco
 # arma ninguna watchlist con tolerancias por-nivel - solo necesita
-# _analizar(coin, tf, ...) directo de niveles_soporte.py.
+# _analizar(coin, tf, ...) directo de niveles.py.
 #
 # De las 7 señales que mercado/senales.NIVEL_UTIL_GRUPO_A puede renombrar/
 # filtrar segun el contexto de nivel, aqui se loguean las 7 (las 4 de
@@ -62,7 +62,7 @@ import time
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from herramientas.niveles_soporte import _analizar
+from herramientas.niveles import _analizar
 from herramientas.descargar_bit import _archivo as _archivo_bitget
 from herramientas.monitor_comun import (
     DIR_LIBRO, CAMPOS_AVISOS, _flt, _localizar_csv_libro, _tail_csv,
@@ -135,7 +135,7 @@ def main():
 
     if k is None or tolerancia_atr is None or toques_min is None:
         print("Faltan parametros obligatorios: --k, --tolerancia-atr, --toques-min")
-        print("(sin defaults a proposito - ver cabecera de niveles_soporte.py)")
+        print("(sin defaults a proposito - ver cabecera de niveles.py)")
         return
 
     # 2026-08-12: ya NO se auto-arranca nada si falta una dependencia -
@@ -158,7 +158,7 @@ def main():
 
     # Niveles para el filtro de contexto del Grupo A - se usa
     # r["techos"]/r["suelos"] (ya agrupados por ROL EFECTIVO, con el flip
-    # aplicado - ver _rol_efectivo en niveles_soporte.py).
+    # aplicado - ver _rol_efectivo en niveles.py).
     niveles_vigentes = ([(n["precio"], "techo") for n in r["techos"]]
                          + [(n["precio"], "suelo") for n in r["suelos"]])
     tolerancia_nivel = r["tolerancia"]

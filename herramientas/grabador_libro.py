@@ -120,6 +120,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import aiohttp
 import ccxt.pro as ccxtpro
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -931,11 +932,21 @@ async def main_async():
         if valor is not None:
             params[clave] = valor
 
+    # session con ThreadedResolver (2026-08-14, ver anotaciones.md): sin
+    # esto, aiohttp usa aiodns por defecto si esta instalado - en Windows
+    # aiodns falla con "Could not contact DNS servers" en la primera
+    # llamada real (confirmado en vivo: load_markets() de ESTA misma
+    # construccion, sin session propia, contra Windows real de Fran).
+    # ThreadedResolver no depende de aiodns/pycares, usa getaddrinfo()
+    # estandar - funciona igual en Linux, donde ya corre este proceso hoy.
+    _conector_ws = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
+    _session_ws = aiohttp.ClientSession(connector=_conector_ws)
     exchange = ccxtpro.bitget({
         "apiKey": os.getenv("BITGET_API_KEY"),
         "secret": os.getenv("BITGET_SECRET_KEY"),
         "password": os.getenv("BITGET_PASSPHRASE"),
         "enableRateLimit": True,
+        "session": _session_ws,
     })
 
     print("Cargando mercados...")
@@ -952,6 +963,7 @@ async def main_async():
     if not coins_activas:
         print("ERROR: ninguna moneda pudo arrancar.")
         await exchange.close()
+        await _session_ws.close()
         return
 
     print(f"Grabando libro/trades/funding/OI (WS) + L/S ratio (REST) de "
@@ -980,6 +992,7 @@ async def main_async():
         for coin in list(coins_activas):
             await _detener_coin(coin, estados, tareas, arch, writer)
         await exchange.close()
+        await _session_ws.close()
 
 
 def main():

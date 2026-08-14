@@ -35,7 +35,7 @@ UMBRAL_ACELERACION_RITMO = 2.5
 RSI_SOBRECOMPRA = 70.0
 RSI_SOBREVENTA = 30.0
 
-# Grupo A (backtest offline contra niveles_soporte.py, ver
+# Grupo A (backtest offline contra niveles.py, ver
 # herramientas/backtest_senales.py --tolerancia-atr/--toques-min): estas 7
 # señales dan mejor edge cuando hay un nivel VIGENTE del tipo "contrario" a
 # su propia direccion cerca (ej. ruptura_alza funciona mejor rompiendo una
@@ -163,7 +163,7 @@ def _rechazo(altos, bajos, cierres, ventana=VENTANA_RUPTURA):
 def _divergencias(velas, altos, bajos, rsi_serie, k):
     """'div_bajista'/'div_alcista': el ultimo swing de PRECIO (via
     indicadores.extremos_locales, mismo detector que usa
-    niveles_soporte.py) marca un nuevo extremo que el RSI NO confirma
+    niveles.py) marca un nuevo extremo que el RSI NO confirma
     (maximo de precio mas alto con RSI mas bajo, o minimo de precio mas
     bajo con RSI mas alto) frente al swing anterior del mismo lado.
 
@@ -206,7 +206,7 @@ def _rsi_giro(rsi_serie):
 def detectar(velas, k, ventana_ruptura=VENTANA_RUPTURA, niveles_vigentes=None, tolerancia_nivel=None):
     """Evalua las 12 señales sobre la ULTIMA vela de 'velas' (asumida
     cerrada). 'k' es el mismo parametro de extremos_locales que ya se usa
-    para detectar niveles (ver niveles_soporte.py) - se reutiliza aqui para
+    para detectar niveles (ver niveles.py) - se reutiliza aqui para
     los swings de divergencia, sin introducir un segundo criterio de
     "swing" en el proyecto.
 

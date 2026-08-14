@@ -1,6 +1,6 @@
 # ---------------------------------------------------------------
 # monitor_niveles.py - Monitorea el precio EN VIVO contra los niveles que
-# calcula niveles_soporte.py, avisando cuando el precio entra o sale de la
+# calcula niveles.py, avisando cuando el precio entra o sale de la
 # zona de tolerancia de un nivel vigente (mismo criterio de "toque" que
 # _contar_toques: |precio - nivel| <= tolerancia).
 #
@@ -15,9 +15,9 @@
 # vivo, comprobar sus dependencias) viven en monitor_comun.py.
 #
 # Los niveles son una FOTO tomada al arrancar (via _analizar() de
-# niveles_soporte.py, sobre el historico ya descargado) - este proceso no
+# niveles.py, sobre el historico ya descargado) - este proceso no
 # los recalcula vela a vela. Si el historico cambio mucho desde que arranco,
-# cortar (Ctrl+C), volver a bajarlo/correr niveles_soporte.py, y reiniciar.
+# cortar (Ctrl+C), volver a bajarlo/correr niveles.py, y reiniciar.
 #
 # Lee (tail) el CSV que escribe grabador_libro.py - NO pide nada a la API
 # por su cuenta, y YA NO arranca sus dependencias si faltan (2026-08-11
@@ -35,12 +35,12 @@
 # ultima vuelta.
 #
 # OJO: un "toque" en vivo (precio entra en nivel +/- tolerancia) NO es lo
-# mismo que "roto" en niveles_soporte.py (que exige --confirmacion-velas
+# mismo que "roto" en niveles.py (que exige --confirmacion-velas
 # CIERRES DE VELA consecutivos). Esto es aviso en tiempo real de que el
 # precio esta ahi - no una confirmacion definitiva de ruptura. Para eso,
-# correr niveles_soporte.py de nuevo despues y mirar el estado.
+# correr niveles.py de nuevo despues y mirar el estado.
 #
-# Con --tf-macro, igual que en niveles_soporte.py: los niveles del TF
+# Con --tf-macro, igual que en niveles.py: los niveles del TF
 # principal se acotan al rango [suelo_macro, techo_macro] antes de vigilarlos
 # (mismos k/tolerancia-atr/toques-min para el macro). Los dos topes macro se
 # vigilan tambien, marcados [macro] en los avisos.
@@ -64,8 +64,8 @@ import time
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from herramientas.niveles_soporte import _analizar
-from herramientas.descargar_bit import _archivo as _archivo_bitget
+from herramientas.niveles import _analizar
+from herramientas.descargar_bit import _archivo_velas as _archivo_bitget
 from herramientas.monitor_comun import (
     DIR_LIBRO, CAMPOS_AVISOS, _flt, _localizar_csv_libro, _tail_csv,
     _ultima_fila_coin, _requerir_grabador_libro, _requerir_feed_velas,
@@ -81,7 +81,7 @@ def _armar_watchlist(coin, tf, k, tolerancia_atr, toques_min, desde_dias,
     """Devuelve (watchlist, tolerancia_micro) - watchlist es una lista de
     dicts {precio, tipo, origen, tolerancia} a vigilar. Sin --tf-macro es
     simplemente todo lo vigente del TF principal; con --tf-macro se acota
-    al rango macro (igual que niveles_soporte.py) y se agregan los dos
+    al rango macro (igual que niveles.py) y se agregan los dos
     topes macro marcados como tal."""
     r = _analizar(coin, tf, k, tolerancia_atr, toques_min, desde_dias, confirmacion_velas)
     tolerancia = r["tolerancia"]
@@ -143,7 +143,7 @@ def main():
 
     if k is None or tolerancia_atr is None or toques_min is None:
         print("Faltan parametros obligatorios: --k, --tolerancia-atr, --toques-min")
-        print("(sin defaults a proposito - ver cabecera de niveles_soporte.py)")
+        print("(sin defaults a proposito - ver cabecera de niveles.py)")
         return
 
     # 2026-08-12: ya NO se auto-arranca nada si falta una dependencia -
@@ -159,8 +159,8 @@ def main():
     tfs_necesarios = {tf} | ({tf_macro} if tf_macro else set())
     faltan = [t for t in tfs_necesarios if not os.path.exists(_archivo_bitget(coin, t))]
     if faltan:
-        print(f"ERROR: falta el historico de {coin.upper()} {', '.join(faltan)} todavia "
-              f"(¿acaba de arrancar el feed? espera a que termine la primera descarga y reintenta).")
+        print(f"ERROR: falta el historico de {coin.upper()} {', '.join(faltan)} en herramientas/velas/ - "
+              f"bajalo primero con: python herramientas/descargar_bit.py --velas {coin.lower()} <tf>")
         return
 
     watch, r = _armar_watchlist(coin, tf, k, tolerancia_atr, toques_min, desde_dias,

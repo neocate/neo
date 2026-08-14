@@ -11,7 +11,7 @@
 #                                     (el que usa monitor_niveles.py en vivo,
 #                                     mas corto pero el precio real vigilado)
 # Es solo para pruebas/calibracion offline - NO se usa para decidir niveles
-# en vivo (ver advertencia de Bitget-vs-Binance en niveles_soporte.py), asi
+# en vivo (ver advertencia de Bitget-vs-Binance en niveles.py), asi
 # que mezclar exchange aqui no es un problema.
 #
 # Recorre el historico vela a vela llamando a senales.detectar() (la MISMA
@@ -35,7 +35,7 @@
 #
 # --tolerancia-atr y --toques-min (los dos juntos activan el contraste):
 # ademas de la tabla de siempre, calcula los niveles vigentes de
-# niveles_soporte.py y clasifica cada señal en 'favorable' (nivel a favor
+# niveles.py y clasifica cada señal en 'favorable' (nivel a favor
 # de su direccion cerca), 'contrario' (nivel en contra cerca) o 'lejos'.
 # Los niveles se RECALCULAN cada --refresco-niveles dias (30 por defecto) a
 # lo largo de todo el periodo -desde/--hasta, cada vez con los ultimos
@@ -71,7 +71,7 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mercado import senales
 from herramientas.descargar_bit import _archivo as _archivo_bitget
-from herramientas.niveles_soporte import (
+from herramientas.niveles import (
     detectar_niveles as _detectar_niveles, _evaluar_estado, _rol_efectivo,
 )
 
@@ -147,13 +147,13 @@ def _cargar_velas(ruta, desde_ms=None, hasta_ms=None):
 
 def _niveles_vigentes(velas_previas, k, tolerancia_atr, toques_min, confirmacion_velas=2):
     """Niveles vigentes (vivos/flip) al final de 'velas_previas' - mismo
-    criterio que _analizar() de niveles_soporte.py, pero operando sobre una
+    criterio que _analizar() de niveles.py, pero operando sobre una
     lista de velas ya en memoria (no releida del disco) para poder darle
     SOLO la historia anterior al periodo que se esta contrastando, sin
     fuga de informacion del periodo hacia el calculo de niveles.
 
     Devuelve (lista de (precio, rol_efectivo), tolerancia) - rol_efectivo
-    ya tiene en cuenta el flip (ver _rol_efectivo de niveles_soporte.py):
+    ya tiene en cuenta el flip (ver _rol_efectivo de niveles.py):
     un techo que hizo flip se devuelve como 'suelo', y viceversa - lo que
     importa para el contraste es el rol ACTUAL, no el original."""
     niveles, atr_ref, tolerancia = _detectar_niveles(velas_previas, k, tolerancia_atr, toques_min)

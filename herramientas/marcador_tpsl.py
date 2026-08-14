@@ -15,7 +15,7 @@
 # contrastar, una vez ajustado [validador_niveles.py] pasamos a ello".
 #
 # TP/SL AHORA se derivan de la tolerancia ATR que ya calcula
-# niveles_soporte.py (mismo criterio que usan monitor_niveles.py/
+# niveles.py (mismo criterio que usan monitor_niveles.py/
 # validador_niveles.py para decidir que es un "toque" de nivel) - NO de un
 # % fijo, porque un TP/SL fijo no tiene sentido igual en un mercado
 # tranquilo que en uno volatil.
@@ -69,7 +69,7 @@ import time
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from herramientas.niveles_soporte import _analizar
+from herramientas.niveles import _analizar
 from herramientas.backtest_senales import DIRECCION_ESPERADA, _tf_minutos
 from herramientas.monitor_comun import (
     DIR_LIBRO, CAMPOS_AVISOS, _flt, _localizar_csv_libro, _tail_csv,
@@ -200,7 +200,7 @@ def main():
 
     if k is None or tolerancia_atr is None or toques_min is None:
         print("Faltan parametros obligatorios: --k, --tolerancia-atr, --toques-min")
-        print("(sin defaults a proposito - ver cabecera de niveles_soporte.py)")
+        print("(sin defaults a proposito - ver cabecera de niveles.py)")
         return
 
     tiempo_max_ms = max(horizontes) * _tf_minutos(tf) * 60_000

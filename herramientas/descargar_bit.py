@@ -42,8 +42,36 @@
 #                                      '--cada' segundos. Unico dueño de
 #                                      mantener al dia herramientas/libro/
 #                                      historico_<COIN>_<TF>_bitget.csv - el
-#                                      resto de modulos (niveles_soporte.py,
-#                                      monitor_niveles.py) son lectores puros.
+#                                      resto de modulos (monitor_senales.py,
+#                                      backtest_senales.py) son lectores puros.
+#   --velas <coin[,c2,...]> [tf]    - historico PERMANENTE (sin cap de dias,
+#     [--cada segundos]               a diferencia de actualizar()/--feed) en
+#                                      herramientas/velas/<COIN>/<TF>_bitget.csv
+#                                      - lector unico: niveles.py
+#                                      (--actualizar). Sin fichero previo
+#                                      descarga TODO el historico disponible;
+#                                      si ya existe, solo AÑADE lo nuevo
+#                                      (append, nunca recorta) - mismo modelo
+#                                      de cache permanente que
+#                                      descargar_bin.py, pero sobre Bitget/
+#                                      futuros (ver arriba: los niveles se
+#                                      vigilan contra el precio de Bitget, no
+#                                      Binance). Sin 'tf' hace las 7 de
+#                                      TIMEFRAMES_NIVELES seguidas.
+#                                      Sin --cada: de un tiro (Linux o
+#                                      Windows, sin diferencia - no toca nada
+#                                      especifico de plataforma), se lanza a
+#                                      mano cada vez que se quiera refrescar.
+#                                      Con --cada: modo daemon (2026-08-14,
+#                                      mismo patron que --feed) - mantiene
+#                                      herramientas/velas/ siempre al dia sin
+#                                      relanzar a mano. actualizar_velas() ya
+#                                      hace su propio lock por fichero, asi
+#                                      que niveles.py --actualizar
+#                                      puede seguir llamando a --velas de un
+#                                      tiro por su cuenta sin pisarse con
+#                                      este daemon si hace falta un refresco
+#                                      instantaneo entre medias.
 #
 # El cap de velas guardadas se calcula por DIAS_OBJETIVO (90 dias, igual
 # para todos los TF), no por un numero fijo de velas. Se probo lo contrario
@@ -66,11 +94,15 @@
 #                 menos profundo que Binance).
 #   python descargar_bit.py --feed [coin[,coin2,...]] [--tfs 1m,5m,15m,30m,1h,4h,1d]
 #                            [--dias-objetivo 90] [--cada 60]
+#   python descargar_bit.py --velas <coin[,coin2,...]> [tf] [--cada segundos]
 #
 # Ejemplos:
 #   python descargar_bit.py btc 5m 1
 #   python descargar_bit.py eth 15m 2023-01-01
 #   python descargar_bit.py --feed btc,eth --cada 60
+#   python descargar_bit.py --velas btc          (las 7 TIMEFRAMES_NIVELES, de un tiro)
+#   python descargar_bit.py --velas btc 1h        (solo 1h, de un tiro)
+#   python descargar_bit.py --velas btc,eth --cada 60   (daemon, todas las TF, dos monedas)
 # ---------------------------------------------------------------
 
 import csv
@@ -88,11 +120,17 @@ from mercado.senales import VENTANA_MAXIMA
 from mercado import datos
 
 DIR_LIBRO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libro")
+DIR_VELAS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "velas")
 
 DIAS_OBJETIVO = 90.0  # confirmado por backtest (2026-08-11, ver mirar.md) -
                        # menos dias rompe el edge de REFINADAS_CONFIRMADAS.
 
 TIMEFRAMES_FEED = ["1m","3m","5m", "15m", "30m", "1h", "4h", "1d"]
+
+# TFs que usa niveles.py via --velas (2026-08-14) - mismo criterio
+# que TIMEFRAMES_FEED pero sin 30m (niveles.py/monitor_niveles.py
+# nunca lo piden, ni como TF principal ni como --tf-macro).
+TIMEFRAMES_NIVELES = ["1m", "3m", "5m", "15m", "1h", "4h", "1d"]
 
 
 def _simbolo(coin):
@@ -110,10 +148,82 @@ def _archivo(coin, timeframe):
     return os.path.join(DIR_LIBRO, nombre)
 
 
-def _desde_ms(desde, cliente):
-    """Interpreta el arg 'desde': fecha ISO, nº de días, o None (todo)."""
+def _archivo_velas(coin, timeframe):
+    """Ruta del historico PERMANENTE de --velas: herramientas/velas/<COIN>/
+    <TF>_bitget.csv - una carpeta por moneda (2026-08-14, a peticion de
+    Fran), separada de herramientas/libro/ (que sigue siendo el historico
+    de 90 dias que mantiene --feed para el resto de monitores en vivo)."""
+    carpeta = os.path.join(DIR_VELAS, _simbolo(coin).split('/')[0])
+    os.makedirs(carpeta, exist_ok=True)
+    return os.path.join(carpeta, f"{timeframe}_bitget.csv")
+
+
+MAX_PASOS_BISECCION = 50  # generoso de sobra: 1m sobre 8 anios necesita ~22
+                           # pasos en el caso determinista perfecto (ver abajo)
+
+
+def _primera_vela_ms(cliente, simbolo, timeframe):
+    """Busca por biseccion el 'since' mas antiguo que Bitget realmente
+    devuelve datos. Comprobado en vivo (2026-08-14): a diferencia de
+    Binance, Bitget NO clampa un 'since' anterior al inicio real del
+    historico a la vela mas antigua disponible - devuelve una lista VACIA
+    (fetch_ohlcv('BTC/USDT:USDT','1d',since=2019-01-01) -> [], mismo
+    sintoma para ETH/ICP) - _desde_ms(None) con una fecha fija se comia en
+    silencio TODO el historico de golpe (descargar() sin 'desde' llevaba
+    este bug ya antes de esta funcion). 'lo' arranca en 2018 (anterior a
+    cualquier listado real en Bitget futuros), 'hi' en ahora (siempre tiene
+    datos) - convergen al primer momento en que fetch_ohlcv empieza a
+    devolver algo. Verificado: BTC 1d converge exacto a 2020-01-01.
+
+    Tope de MAX_PASOS_BISECCION iteraciones (2026-08-14, bug real en vivo):
+    con ETH 4h, la biseccion se quedo oscilando sin converger nunca (500+
+    pasos, siempre entre las mismas dos fechas) - la respuesta de Bitget
+    para un 'since' cerca del borde real NO es perfectamente determinista
+    (la misma consulta a veces devuelve datos y a veces vacio), rompiendo
+    la asuncion de biseccion pura de que el oraculo es una funcion estable
+    de 'since'. Sin tope esto colgaba el proceso para siempre (parecia un
+    lock, no lo era). Con tope: si no converge del todo, se acepta el 'hi'
+    mas ajustado conseguido (sigue siendo un punto CONFIRMADO con datos,
+    solo que no se afino mas alla de eso) en vez de seguir para siempre."""
+    tf_ms = cliente.parse_timeframe(timeframe) * 1000
+    lo = cliente.parse8601('2018-01-01T00:00:00Z')
+    hi = cliente.milliseconds()
+    print(f"  Buscando inicio real de historico de {simbolo} {timeframe} "
+          f"(sin cache previa, primera vez)...")
+    lote = cliente.fetch_ohlcv(simbolo, timeframe, since=lo, limit=1)
+    if lote:
+        return lote[0][0] - 1  # -1ms: 'since' es exclusivo, sin esto se
+                                # perderia esta primera vela confirmada
+    for paso in range(1, MAX_PASOS_BISECCION + 1):
+        if hi - lo <= tf_ms:
+            break
+        mid = (lo + hi) // 2
+        lote = cliente.fetch_ohlcv(simbolo, timeframe, since=mid, limit=1)
+        if lote:
+            hi = lote[0][0]
+        else:
+            lo = mid + tf_ms
+        if paso % 5 == 0:
+            print(f"    ...acotando ({datetime.fromtimestamp(lo/1000, timezone.utc):%Y-%m-%d} - "
+                  f"{datetime.fromtimestamp(hi/1000, timezone.utc):%Y-%m-%d})")
+    else:
+        print(f"  AVISO: no convergio del todo tras {MAX_PASOS_BISECCION} pasos "
+              f"(Bitget respondio de forma inconsistente cerca del borde) - "
+              f"se usa el punto mas ajustado confirmado con datos.")
+    print(f"  Inicio real: {datetime.fromtimestamp(hi/1000, timezone.utc):%Y-%m-%d}")
+    return hi - 1  # -1ms: 'since' es exclusivo, mismo motivo que arriba -
+                   # 'hi' es una vela CONFIRMADA con datos, no perderla
+
+
+def _desde_ms(desde, cliente, simbolo=None, timeframe=None):
+    """Interpreta el arg 'desde': fecha ISO, nº de días, o None (todo - busca
+    el inicio real por biseccion via _primera_vela_ms si se pasan simbolo/
+    timeframe; si no, 2019-01-01 como antes, sabiendo que puede devolver
+    vacio para TFs/monedas cuyo historico empiece despues, ver arriba)."""
     if desde is None:
-        return cliente.parse8601('2019-01-01T00:00:00Z')  # Bitget futuros, margen de sobra
+        if simbolo and timeframe:
+            return _primera_vela_ms(cliente, simbolo, timeframe)
+        return cliente.parse8601('2019-01-01T00:00:00Z')
     if '-' in str(desde):
         return cliente.parse8601(f"{desde}T00:00:00Z")
     # número de días hacia atrás
@@ -181,7 +291,7 @@ def _con_lock(ruta, timeout=1800.0, espera=2.0):
     para que dos escritores (el feed y una ejecucion manual puntual) no
     toquen el mismo historico a la vez - el peor momento para pisarse es
     durante un recorte (_recortar_si_hace_falta reescribe el fichero
-    entero). Los lectores (niveles_soporte.py, monitor_niveles.py) NO
+    entero). Los lectores (niveles.py, monitor_niveles.py) NO
     necesitan este lock: ya tratan una fila a medio escribir al final del
     fichero como no consumida todavia (mismo patron que _tail_csv usa para
     flujo_*.csv), y _recortar_si_hace_falta usa os.replace() atomico, asi
@@ -189,12 +299,17 @@ def _con_lock(ruta, timeout=1800.0, espera=2.0):
     completo hasta que lo reabra."""
     ruta_lock = ruta + ".lock"
     inicio = time.monotonic()
+    avisado = False
     while True:
         try:
             fd = os.open(ruta_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.close(fd)
             break
         except FileExistsError:
+            if not avisado:
+                print(f"  Esperando lock de {ruta_lock} (¿otra descarga en curso, o restos de "
+                      f"una anterior sin terminar limpio? maximo {timeout:.0f}s antes de fallar)...")
+                avisado = True
             if time.monotonic() - inicio > timeout:
                 raise TimeoutError(f"lock de {ruta} no liberado tras {timeout:.0f}s")
             time.sleep(espera)
@@ -206,10 +321,21 @@ def _con_lock(ruta, timeout=1800.0, espera=2.0):
 
 def _descargar_rango(cliente, simbolo, timeframe, since, hasta_ms, limite_req=200):
     """Pagina fetch_ohlcv desde 'since' hasta 'hasta_ms' (exclusive).
-    Devuelve velas ordenadas y sin duplicados."""
+    Devuelve velas ordenadas y sin duplicados.
+
+    'since' en Bitget/ccxt es EXCLUSIVO (devuelve velas > since, no >=) -
+    comprobado en vivo el 2026-08-14 con ETH 15m: pedir since=X (un
+    timestamp de vela real) devuelve la vela SIGUIENTE, nunca X misma. El
+    codigo viejo avanzaba la pagina con since=ultima_vela+tf_ms, que sumado
+    a esa exclusividad se comia la vela justo en ese punto - hueco de
+    EXACTAMENTE 1 vela en cada frontera de pagina (cada 'limite_req' velas,
+    200 por defecto), reproducido en los 7 TF de ETH sin excepcion. Fix:
+    avanzar con since=ultima_vela (sin sumar tf_ms) - la exclusividad de la
+    API ya deja fuera esa vela y empieza justo en la siguiente."""
     tf_ms = cliente.parse_timeframe(timeframe) * 1000
     velas = []
     vistos = set()
+    pagina = 0
     while since < hasta_ms:
         try:
             lote = cliente.fetch_ohlcv(simbolo, timeframe, since=since, limit=limite_req)
@@ -225,12 +351,19 @@ def _descargar_rango(cliente, simbolo, timeframe, since, hasta_ms, limite_req=20
                 vistos.add(v[0])
                 velas.append(v)
                 nuevos += 1
-        since = lote[-1][0] + tf_ms
-        if len(velas) % 20000 < limite_req:
+        since = lote[-1][0]
+        pagina += 1
+        # cada 10 paginas (no cada 20000 velas: con TFs finos y --dias-objetivo
+        # capado, o TFs gruesos con poco historico, esto podia no imprimir NUNCA
+        # y una descarga larga parecia colgada sin estarlo - 2026-08-14)
+        if pagina % 10 == 0:
             print(f"  {len(velas)} velas... "
                   f"({datetime.fromtimestamp(lote[-1][0]/1000, timezone.utc):%Y-%m-%d})")
         if nuevos == 0:
             break
+    if velas:
+        print(f"  {len(velas)} velas descargadas "
+              f"({datetime.fromtimestamp(velas[-1][0]/1000, timezone.utc):%Y-%m-%d}).")
     velas.sort(key=lambda v: v[0])
     return velas
 
@@ -247,7 +380,7 @@ def descargar(coin, timeframe, desde=None, limite_req=200):
     entero. Para refrescar sin perder lo ya bajado usar actualizar()."""
     cliente = ccxt.bitget({'enableRateLimit': True})
     simbolo = _simbolo(coin)
-    since = _desde_ms(desde, cliente)
+    since = _desde_ms(desde, cliente, simbolo, timeframe)
     hasta_ms = _hasta_ms_cerrado(cliente, timeframe)
 
     print(f"Descargando {simbolo} {timeframe} desde "
@@ -297,8 +430,12 @@ def actualizar(coin, timeframe, dias_objetivo=DIAS_OBJETIVO, limite_req=200):
     else:
         tf_ms = cliente.parse_timeframe(timeframe) * 1000
         ultimo_ts = _ultimo_timestamp_ms(ruta)
-        since = ultimo_ts + tf_ms
-        if since < hasta_ms:
+        # since=ultimo_ts (NO +tf_ms): 'since' en Bitget es EXCLUSIVO, ya
+        # deja fuera ultimo_ts por su cuenta - sumar tf_ms aqui se comia
+        # SIEMPRE la primera vela nueva de cada actualizacion (ver
+        # _descargar_rango, mismo bug, mismo fix).
+        since = ultimo_ts
+        if ultimo_ts + tf_ms < hasta_ms:
             nuevas = _descargar_rango(cliente, simbolo, timeframe, since, hasta_ms, limite_req)
             if nuevas:
                 with open(ruta, 'a', newline='') as f:
@@ -307,6 +444,57 @@ def actualizar(coin, timeframe, dias_objetivo=DIAS_OBJETIVO, limite_req=200):
                       f"(hasta {datetime.fromtimestamp(nuevas[-1][0]/1000, timezone.utc):%Y-%m-%d %H:%M} UTC)")
 
     _recortar_si_hace_falta(ruta, velas_objetivo)
+    return ruta
+
+
+def actualizar_velas(coin, timeframe, limite_req=200):
+    """Version PERMANENTE de actualizar(): sin DIAS_OBJETIVO, nunca recorta.
+    Escribe en _archivo_velas() (herramientas/velas/<COIN>/), no en
+    herramientas/libro/. Sin fichero previo descarga TODO el historico
+    disponible (igual que descargar(coin, tf, desde=None)); si ya existe,
+    lee la ultima vela guardada y solo AÑADE lo que falta - mismo modelo de
+    cache permanente que descargar_bin.py (Binance), aplicado aqui a
+    Bitget/futuros porque niveles.py (unico consumidor de esta
+    carpeta) necesita el precio exacto que ve monitor.py, no el de otro
+    exchange (ver cabecera del fichero). De un tiro: se lanza a mano cuando
+    se quiera refrescar, no es un daemon (a diferencia de --feed) - por eso
+    no necesita nada especifico de plataforma, corre igual en Linux (NAS)
+    que en Windows."""
+    cliente = ccxt.bitget({'enableRateLimit': True})
+    simbolo = _simbolo(coin)
+    ruta = _archivo_velas(coin, timeframe)
+    hasta_ms = _hasta_ms_cerrado(cliente, timeframe)
+
+    with _con_lock(ruta):
+        if not os.path.exists(ruta):
+            since = _desde_ms(None, cliente, simbolo, timeframe)
+            print(f"Descargando {simbolo} {timeframe}: historico completo ...")
+            velas = _descargar_rango(cliente, simbolo, timeframe, since, hasta_ms, limite_req)
+            if not velas:
+                print("  No se descargó nada (¿símbolo o timeframe inválido?).")
+                return ruta
+            with open(ruta, 'w', newline='') as f:
+                w = csv.writer(f)
+                w.writerow(['timestamp', 'fecha_utc', 'open', 'high', 'low', 'close', 'volumen'])
+                _escribir_filas(f, velas)
+            print(f"  [OK] {simbolo} {timeframe}: {len(velas)} velas guardadas en {ruta}")
+            print(f"       {datetime.fromtimestamp(velas[0][0]/1000, timezone.utc):%Y-%m-%d} "
+                  f"-> {datetime.fromtimestamp(velas[-1][0]/1000, timezone.utc):%Y-%m-%d}")
+        else:
+            tf_ms = cliente.parse_timeframe(timeframe) * 1000
+            ultimo_ts = _ultimo_timestamp_ms(ruta)
+            since = ultimo_ts  # ver nota de "since exclusivo" en actualizar()
+            if ultimo_ts + tf_ms >= hasta_ms:
+                print(f"  {simbolo} {timeframe} ya esta al dia.")
+                return ruta
+            nuevas = _descargar_rango(cliente, simbolo, timeframe, since, hasta_ms, limite_req)
+            if not nuevas:
+                print(f"  {simbolo} {timeframe}: no hay velas nuevas todavia.")
+                return ruta
+            with open(ruta, 'a', newline='') as f:
+                _escribir_filas(f, nuevas)
+            print(f"  [OK] {simbolo} {timeframe}: +{len(nuevas)} velas "
+                  f"(hasta {datetime.fromtimestamp(nuevas[-1][0]/1000, timezone.utc):%Y-%m-%d %H:%M} UTC)")
     return ruta
 
 
@@ -332,8 +520,58 @@ def _feed(coins, tfs, dias_objetivo, cada):
         print("\nParado por el usuario.")
 
 
+def _feed_velas(coins, tfs, cada):
+    """Modo daemon para --velas (2026-08-14): igual que _feed() pero sobre
+    el historico PERMANENTE de herramientas/velas/ (sin cap de dias) en
+    vez de herramientas/libro/. actualizar_velas() ya hace su propio
+    _con_lock() por dentro, asi que cualquier otro proceso (ej.
+    niveles.py --actualizar) puede llamarla directamente para un
+    refresco instantaneo sin pisarse con este bucle - el lock de fichero
+    ya evita que dos escrituras coincidan, sea cual sea quien la dispare."""
+    print(f"Feed de velas permanentes: {', '.join(coins)} / {', '.join(tfs)} "
+          f"(cada={cada:.0f}s). Ctrl+C para parar.")
+    try:
+        while True:
+            for coin in coins:
+                for tf in tfs:
+                    try:
+                        actualizar_velas(coin, tf)
+                    except Exception as e:
+                        print(f"  (aviso) {coin} {tf}: {e}")
+            time.sleep(cada)
+    except KeyboardInterrupt:
+        print("\nParado por el usuario.")
+
+
 def main():
     args = sys.argv[1:]
+    if args and args[0] == "--velas":
+        args = args[1:]
+        if not args:
+            print("Uso: python descargar_bit.py --velas <coin[,coin2,...]> [tf] [--cada segundos]")
+            return
+        coins = [c.strip().upper() for c in args[0].split(",")]
+        resto = args[1:]
+        tf_unico = None
+        if resto and not resto[0].startswith("--"):
+            tf_unico = resto[0]
+            resto = resto[1:]
+        cada = None
+        i = 0
+        while i < len(resto):
+            if resto[i] == "--cada":
+                i += 1; cada = float(resto[i])
+            i += 1
+        tfs = [tf_unico] if tf_unico else TIMEFRAMES_NIVELES
+
+        if cada is None:
+            for coin in coins:
+                for tf in tfs:
+                    actualizar_velas(coin, tf)
+        else:
+            _feed_velas(coins, tfs, cada)
+        return
+
     if args and args[0] == "--feed":
         args = args[1:]
         if args and not args[0].startswith("--"):
@@ -367,6 +605,8 @@ def main():
         print("\nModo daemon (siempre corriendo, ver cabecera del fichero):")
         print("  python descargar_bit.py --feed [coin[,coin2,...]] [--tfs 1m,5m,15m,30m,1h,4h,1d]")
         print("                           [--dias-objetivo 90] [--cada 60]")
+        print("\nHistorico permanente para niveles.py (ver cabecera):")
+        print("  python descargar_bit.py --velas <coin[,coin2,...]> [tf] [--cada segundos]")
         return
     coin = sys.argv[1]
     timeframe = sys.argv[2]

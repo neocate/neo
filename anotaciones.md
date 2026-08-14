@@ -1,5 +1,228 @@
 # Anotaciones
 
+- 2026-08-14: `ccxt.pro` (WS) no funciona en Windows sin arreglo -
+  `aiodns.error.DNSError: (11, 'Could not contact DNS servers')` en la
+  primera llamada HTTP real de cualquier `ccxtpro.bitget({...})` sin
+  `session` propia (`load_markets()`, o cualquier `watch_*`) - `aiohttp`
+  usa `aiodns`/`pycares` por defecto si esta instalado, y ese resolver no
+  consigue leer la configuracion DNS en Windows. Importa AHORA aunque el
+  proyecto solo corra en el NAS hoy - Fran: "si dentro de un año tengo que
+  pasarlo a un windows no quiero reconstruirlo todo", portabilidad
+  Linux/Windows es requisito de diseño del proyecto, no solo de un script
+  suelto.
+
+  Reproducido en DOS maquinas Windows independientes (el sandbox de esta
+  sesion Y el Windows real de Fran, error identico en ambas) - no es un
+  artefacto de sandbox. Nota de proceso: la primera vez que se reporto
+  "falla en Windows" solo estaba verificado en el sandbox, no en una
+  maquina de Fran - correccion explicita suya ("pero como sabemos que
+  falla en windows?") antes de dar el hallazgo por bueno; se le paso el
+  mismo test para que lo corriera el mismo en su Windows real, confirmando
+  el fallo primero y el arreglo despues.
+
+  Confirmado que `grabador_libro.py` (unico consumidor de `ccxt.pro` en el
+  proyecto hasta ahora) tiene este bug latente: su `ccxtpro.bitget()` (sin
+  `session` propia) fallaria igual si se lanzara desde Windows - probado
+  su `load_markets()` exacto (mismos parametros, sin credenciales) contra
+  el Windows real de Fran, mismo fallo.
+
+  **Fix aplicado a `grabador_libro.py`** (linea ~934, compila limpio -
+  pendiente de que Fran lo relance para confirmarlo en marcha; el fichero
+  esta en produccion en el NAS ahora mismo, no se ha reiniciado el
+  proceso): pasar una `aiohttp.ClientSession` propia con
+  `TCPConnector(resolver=aiohttp.ThreadedResolver())` en el constructor de
+  `ccxtpro.bitget()` (parametro `session=`), y cerrarla junto con
+  `exchange.close()` en los dos puntos donde ya se cerraba. `ThreadedResolver`
+  usa `socket.getaddrinfo()` estandar via threadpool en vez de
+  `aiodns`/`pycares` - evita el problema por completo, y no depende de
+  nada especifico de Windows, asi que no debería cambiar nada en el NAS/
+  Linux donde ya corre en produccion (mismo mecanismo de resolucion DNS
+  que usa el resto de llamadas REST sincronas del proyecto, que nunca
+  tuvieron este problema).
+
+  Contexto: surgio al intentar añadir un modo de refresco por WS a
+  `descargar_bit.py` (`herramientas/velas/`, motivado por la necesidad de
+  agilidad en TFs rapidos como 1m/3m para el historial de niveles de
+  `niveles.py --actualizar`, ver entrada de mas abajo) - de
+  momento se sigue con REST (pendiente `--cada` tipo `--feed` sobre
+  `--velas`, sin implementar aun) mientras se decide si vale la pena el
+  salto a WS tambien ahi, ahora que el fix de portabilidad ya existe y
+  esta verificado.
+
+- 2026-08-14: `descargar_bit.py` gana `--velas` (historico PERMANENTE de
+  Bitget en `herramientas/velas/<COIN>/<TF>_bitget.csv`, sin el cap de
+  `DIAS_OBJETIVO` que usa `--feed`/`herramientas/libro/`) y `niveles_soporte.py`
+  se renombra a `niveles.py` y gana `--actualizar` (historial persistente
+  de niveles). Motivado por Fran: quiere poder distinguir una resistencia
+  historica (confirmada muchas veces a lo largo de años, nunca rota) de
+  una resistencia de mera direccion de mercado (recien formada, pocos
+  toques) - para eso hace falta historico mas profundo del que daba
+  `herramientas/libro/` (capado a 90 dias) y un registro que sobreviva
+  entre ejecuciones, cosas que `niveles_soporte.py` no tenia (recalculaba
+  todo desde cero cada vez, sin persistencia).
+
+  - **Bug real encontrado en `descargar_bit.py` (afecta tambien a
+    `descargar()`/`actualizar()`/`--feed`, no solo a `--velas`, ver
+    abajo):** el `since` de Bitget/ccxt es EXCLUSIVO (`>`, no `>=`) -
+    comprobado en vivo con ETH 15m: pedir `since=X` (un timestamp de vela
+    real) nunca devuelve la vela X misma, siempre la siguiente. Dos
+    consecuencias silenciosas antes del fix: (1) `_desde_ms(None,...)`
+    (modo "todo el historico") usaba un `since` fijo de 2019-01-01, pero
+    Bitget devuelve LISTA VACIA (no clampa a la vela mas antigua real, a
+    diferencia de Binance) para cualquier `since` anterior al inicio real
+    del listado - `descargar(coin, tf, desde=None)` llevaba tiempo
+    devolviendo "No se descargó nada" en silencio para cualquier coin/tf
+    cuyo inicio real fuera posterior a 2019 (o sea, todas: BTC/ETH/ICP
+    convergen a 2020-01-01/2020-01-01/~2022 respectivamente, verificado
+    con llamadas reales). (2) `_descargar_rango()` avanzaba la pagina con
+    `since = ultima_vela + tf_ms`, y `actualizar()`/`actualizar_velas()`
+    hacian lo mismo al reanudar - sumado a la exclusividad, esto se
+    comia SIEMPRE la vela justo en esa frontera: exactamente 1 vela
+    perdida en cada frontera de pagina (cada 200 velas, el `limite_req`
+    por defecto) Y en cada actualizacion incremental. Reproducido y
+    confirmado con una auditoria real de `herramientas/velas/ETH/` (7
+    ficheros, patron de hueco de "exactamente 1 vela cada 200 filas" en
+    los 7 sin excepcion) - esto llevaba tiempo pasando tambien en
+    `herramientas/libro/` via `--feed` (mismo codigo compartido,
+    `_descargar_rango`/`actualizar()`), asi que el historico en vivo que
+    usan `monitor_senales.py`/`backtest_senales.py`/`marcador_tpsl.py`
+    probablemente tenga huecos de este tipo acumulados desde que arranco
+    - NO se ha reparado ese historico viejo, solo se corta la sangria de
+    aqui en adelante. Fix: `since = ultima_vela` (sin sumar `tf_ms`) en
+    los tres sitios, y `_primera_vela_ms()` nueva (biseccion real,
+    verificada en vivo: BTC 1d converge exacto a 2020-01-01) en vez de la
+    fecha fija, con `-1ms` en el valor devuelto (la exclusividad se comeria
+    tambien la primera vela real si no).
+  - **Segundo bug, encontrado probando el fix en vivo con ETH 4h:** la
+    biseccion de `_primera_vela_ms()` se quedo oscilando sin converger
+    nunca (500+ pasos, siempre entre las mismas dos fechas) - la respuesta
+    de Bitget para un `since` cerca del borde real NO es perfectamente
+    determinista (la misma consulta a veces devuelve datos y a veces
+    vacio), rompiendo la asuncion de biseccion pura. Sin tope, esto colgaba
+    el proceso para siempre (parecia un lock, no lo era - confundio a
+    Fran, ver el `AVISO` que ahora imprime). Fix: `MAX_PASOS_BISECCION=50`
+    - si no converge del todo, se acepta el punto mas ajustado confirmado
+    con datos en vez de seguir para siempre. Repetido en vivo con BTC:
+    salto el aviso de "no convergio del todo" en 6 de sus 7 TF (1m-4h),
+    siempre resolviendo a una fecha real igualmente - el tope funciona
+    como red de seguridad, no como fallo.
+  - `--velas <coin[,coin2,...]> [tf] [--cada segundos]`: sin `--cada`, de
+    un tiro (Linux o Windows, sin diferencia - no usa nada especifico de
+    plataforma, a diferencia del WS de la entrada de arriba). Con `--cada`
+    (añadido mas tarde el mismo dia, `_feed_velas()`, mismo patron que
+    `_feed()`): modo daemon. `actualizar_velas()` ya tenia su propio lock
+    de fichero por dentro desde el principio, asi que una llamada puntual
+    de un tiro (ej. desde `niveles.py --actualizar`) puede convivir con el
+    daemon sin pisarse - probado en vivo lanzando el mismo `--velas btc`
+    a la vez desde el NAS y desde Windows contra el mismo fichero: uno
+    espera al otro por el lock, ninguno corrompe nada.
+  - Progreso silencioso corregido de paso: ni la biseccion ni la descarga
+    por paginas imprimian nada hasta terminar - con historicos largos (o
+    un lock viejo colgado, ver mas abajo) parecia colgado sin estarlo.
+    Ahora imprimen cada 5 pasos de biseccion / cada 10 paginas, y
+    `_con_lock()` avisa si tiene que esperar en vez de quedarse callado
+    hasta el timeout de 1800s.
+
+  - **`niveles_soporte.py` renombrado a `niveles.py`** (a peticion de
+    Fran) - actualizados los imports/comentarios en los 8 ficheros que lo
+    referenciaban: `backtest_senales.py`, `marcador_tpsl.py`,
+    `monitor_niveles.py`, `monitor_senales.py`, `validador_niveles.py`,
+    `descargar_bit.py`, `mercado/senales.py` y el propio fichero. Las
+    entradas de este log ANTERIORES a hoy (2026-08-07 a 2026-08-13) siguen
+    diciendo `niveles_soporte.py` a proposito - asi se llamaba entonces,
+    es historial correcto de esa fecha, no se reescriben con el nombre
+    nuevo.
+  - **`niveles.py --actualizar <coin> <tf> --k .. --tolerancia-atr ..
+    --toques-min .. [--confirmacion-velas 2] [--cada segundos]`**: nuevo
+    listado persistente en `herramientas/niveles/<COIN>/` -
+    `listado_<TF>.json` (estado vivo: precio/tipo/toques/estado/
+    seguimiento incremental de cada nivel, se sobreescribe atomico cada
+    vez) + `historial_<TF>.csv` (log append-only, una fila por evento:
+    `nivel_inicial`/`nivel_nuevo`/`toque`/`rotura`/`flip` - nunca se
+    reescribe, solo crece). Mecanismo acordado con Fran tras descartar DOS
+    diseños mas complejos que propuse yo primero (uno con modos separados
+    `--backfill`/`--continuo` y ventana deslizante tipo
+    `backtest_senales._niveles_por_tramos`, otro con cache en memoria +
+    re-deteccion periodica) - Fran los simplifico el mismo dia a esto:
+    "una vez calculado y anotado no necesita recalcular otra vez, solo lo
+    haria si se cambiase algun parametro", y despues "niveles hace un
+    primer barrido, y crea un listado con los soportes resistencias
+    vigentes, solo tiene que con las nuevas velas, actualizar esos
+    estados". Resultado, mucho mas simple que lo que yo habia diseñado:
+    - Sin listado previo (o si cambian k/tolerancia-atr/toques-min/
+      confirmacion-velas respecto al guardado): `_crear_listado()` - UNA
+      pasada de `detectar_niveles()`+`_evaluar_estado()` sobre TODO
+      `herramientas/velas/` (no hace falta ventana deslizante, esas
+      funciones ya escanean el historico completo de una vez).
+    - Con listado existente y MISMOS parametros: `_actualizar()` lee solo
+      las velas nuevas desde `ultimo_ts_procesado` y actualiza los niveles
+      YA conocidos con `_actualizar_listado_con_vela()` - reproduce las
+      mismas dos reglas de `_contar_toques`/`_evaluar_estado` (agrupar
+      toques por entrar/salir de tolerancia; `confirmacion_velas` cierres
+      consecutivos para romper, primer retoque tras rotura = flip) pero
+      vela a vela, O(niveles conocidos) por vela, sin reescanear nada.
+      Niveles NUEVOS se detectan igual de barato: `_nuevo_candidato()`
+      comprueba si una vela (la de hace `k` velas, que ya tiene sus `k`
+      vecinos a cada lado) es un extremo local nuevo - O(k), mismo
+      criterio que `indicadores.extremos_locales()` para un solo punto -
+      y solo si pasa esa criba cuenta sus toques sobre el historico
+      completo (caro, pero raro: hace falta dominar 2k+1 velas).
+    - `--cada` (añadido mas tarde el mismo dia, `_feed_niveles()`, mismo
+      patron que `--velas --cada`): como `_actualizar()` ya es barata
+      cuando no hay nada nuevo ("ya esta al dia"), este bucle no tiene
+      coste real la mayoria de las vueltas - el barrido caro solo pasa la
+      primera vez o si cambian los parametros.
+    - Explicitamente FUERA de alcance por ahora: la herramienta que
+      consulte `historial_<TF>.csv` agrupando por zona de precio para
+      puntuar "cuantas veces se ha confirmado esta zona a lo largo del
+      tiempo" (la idea original de Fran de distinguir resistencia
+      historica de resistencia direccional) - el historial ya se esta
+      grabando, falta construir la consulta cuando haya datos acumulados
+      de sobra.
+  - **Caveat conocido, no urgente:** `niveles.py` lee
+    `herramientas/velas/<COIN>/<TF>_bitget.csv` SIN lock, mientras que
+    `descargar_bit.py --velas` si lo bloquea al escribir - con los dos en
+    bucle continuo (`--cada`) existe una ventana pequeña donde `niveles.py`
+    podria leer una fila a medio escribir y fallar el parseo. Autocorrectivo
+    (el `except Exception` de `_feed_niveles()` lo captura, avisa, y la
+    siguiente vuelta relee el fichero ya completo) - sin arreglar a
+    proposito, revisar si `herramientas/niveles/_salida.log` empieza a
+    acumular avisos repetidos.
+  - **Hallazgos de datos en vivo, motivaron/confirmaron el diseño de
+    arriba:**
+    - Barrido de sensibilidad (presets laxo/medio/estricto variando
+      k/tolerancia-atr/toques-min juntos) sobre las 7 TF de ETH: el
+      recuento de niveles se reduce de forma consistente 2.2x-2.6x de laxo
+      a estricto en las 7 TF por igual (nada se dispara ni se queda
+      plano). Confirma en niveles la MISMA asimetria techo/suelo ya
+      documentada para señales (entrada de auditoria de asimetria alza/
+      baja, 2026-08-13: "rupturas a la baja mas bruscas/rapidas... 
+      continuacion alcista mas sostenida") - en casi todas las TF los
+      techos acumulan mas toques que los suelos (ej. 4h: techos hasta 40
+      toques, suelos hasta 27), excepto 1h, que sale invertido (mas
+      toques en suelos) sin explicacion clara todavia.
+    - Analisis de antiguedad de niveles vigentes (campo `antig_dias`, ya
+      calculado por `_analizar()` pero sin usar hasta ahora): en 1m-15m no
+      hay problema real (mediana ~3 dias, el mas viejo se queda dentro del
+      60-70% de la ventana disponible). En 4h y sobre todo 1d SI hay
+      niveles genuinamente antiguos - 1d con mediana de 204 dias y el mas
+      viejo con **1319 dias (3.6 años)**, sin romper desde que hay
+      historico de ETH en Bitget (sept. 2022). Confirma la observacion de
+      Fran ("el precio actual no es el de hace 3.6 años") de que
+      "vigente" mezcla en el mismo listado, con el mismo peso, un nivel de
+      la semana pasada y uno de hace años - motivo directo del historial
+      persistente de arriba.
+
+  Estado operativo al cerrar esta parte de la sesion: `herramientas/velas/`
+  y `herramientas/niveles/` con datos reales para ETH (7 TF) y BTC (7 TF
+  velas, 4h/1h/15m niveles) - ICP con velas pero niveles.py --actualizar
+  solo lanzado para 4h/1h/15m tambien. En el NAS, corriendo en `--cada 60`:
+  3x `descargar_bit.py --velas <coin>` (btc/eth/icp, cada uno cubre sus 7
+  TF por dentro) + 9x `niveles.py --actualizar <coin> <tf>` (3 coins x
+  4h/1h/15m) + `grabador_libro.py` de siempre - `ESTADO.md` NO se ha
+  actualizado con este cambio todavia (sigue reflejando la foto del
+  2026-08-13, ya desactualizada en varios frentes de esta sesion).
+
 - 2026-08-13: Auditoria de datos del Grupo A (`mercado/senales.NIVEL_UTIL_GRUPO_A`/
   `REFINADAS_CONFIRMADAS`) a peticion de Fran, motivada por ver en vivo que
   `ruptura_alza_en_resistencia` salia floja en una muestra de ~36h

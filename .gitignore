@@ -20,6 +20,12 @@ flujo_*.csv
 # herramientas/libro/ - mismo criterio de "se regenera en vivo, no se sube".
 herramientas/grabador_libro/
 
+# 2026-08-14: descargar_bit.py --velas (historico permanente de Bitget) y
+# niveles.py --actualizar (listado_<TF>.json + historial_<TF>.csv) - mismo
+# criterio: se regeneran corriendo los scripts, no se suben.
+herramientas/velas/
+herramientas/niveles/
+
 # Cache de historicos completos (Binance, 2017+) - GBs de datos (nombre
 # real: <DD-MM-AA>_<COIN>_<TF>_binance.csv, sin prefijo "historico_" - por
 # eso necesita su propio patron, el de arriba no lo cubre). Vive en

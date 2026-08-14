@@ -17,7 +17,7 @@
 # No hace falta tailear avisos_*.csv ni definir ninguna ventana de tiempo:
 # la señal solo dispara al cerrar su propia vela (senales_<coin>_<tf>.csv,
 # que escribe monitor_senales.py), y los niveles vigentes
-# (niveles_soporte._analizar()["techos"/"suelos"]) son un ESTADO, no un
+# (niveles._analizar()["techos"/"suelos"]) son un ESTADO, no un
 # evento - se comprueba en el mismo instante que cierra esa vela. Tampoco
 # hace falta flujo_<coin>.csv ni grabador_libro.py - a diferencia de
 # marcador_tpsl.py, aqui no se seguie el precio tick a tick despues, solo
@@ -62,7 +62,7 @@ import time
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from herramientas.niveles_soporte import _analizar
+from herramientas.niveles import _analizar
 from herramientas.monitor_comun import DIR_LIBRO, CAMPOS_AVISOS, _flt, _tail_csv, _proceso_corriendo
 from mercado.senales import NIVEL_UTIL_GRUPO_A, NOMBRE_REFINADO
 
@@ -88,8 +88,8 @@ def _fmt_fecha_ahora():
 
 def _refrescar_niveles(coin, tf, k, tolerancia_atr, toques_min, desde_dias, confirmacion_velas):
     """(tolerancia, techos, suelos) - techos/suelos son los vigentes AHORA
-    (r["techos"]/r["suelos"] de niveles_soporte._analizar(), ya vivos/flip,
-    ver niveles_soporte.py)."""
+    (r["techos"]/r["suelos"] de niveles._analizar(), ya vivos/flip,
+    ver niveles.py)."""
     r = _analizar(coin, tf, k, tolerancia_atr, toques_min, desde_dias, confirmacion_velas)
     return r["tolerancia"], r["techos"], r["suelos"]
 
@@ -191,7 +191,7 @@ def main():
 
     if k is None or tolerancia_atr is None or toques_min is None:
         print("Faltan parametros obligatorios: --k, --tolerancia-atr, --toques-min")
-        print("(sin defaults a proposito - ver cabecera de niveles_soporte.py)")
+        print("(sin defaults a proposito - ver cabecera de niveles.py)")
         return
 
     # 2026-08-12: cadena en cascada pedida por Fran - si monitor_niveles.py
