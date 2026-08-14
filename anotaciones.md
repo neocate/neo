@@ -1,5 +1,95 @@
 # Anotaciones
 
+- 2026-08-14: Auditoria de `herramientas/grabador_libro/flujo_ETH.csv` a
+  peticion de Fran (analisis fresco, sin apoyarse en scripts guardados -
+  el propio Fran confirmo que asi funciona mejor en este proyecto, la
+  herramienta se queda obsoleta mas rapido que el dato). 6866 filas,
+  2026-08-13 15:19 -> 2026-08-14 19:58 UTC (~28.6h desde que arranco la
+  reescritura WS): sin timestamps duplicados, sin huecos >2min, sin filas
+  malformadas, los 1715 snapshots de libro crudo (`bids_json`/`asks_json`)
+  son JSON valido.
+
+  - **Bug real encontrado y arreglado**: fila 767 (18:31:12, ~16min tras un
+    reinicio de proceso) trae el libro cruzado (`bid=1876.42 > ask=1876.37`).
+    `mercado/flujo.spread_bps()` ya se protegia explicitamente contra esto
+    (`if m <= 0 or p_ask < p_bid: return None`), pero `mid()`/`microprecio()`
+    no tenian el mismo guard y calculaban un valor enganoso sobre el libro
+    cruzado esa fila. Arreglado (mismo guard `ask[0] < bid[0]` anadido a las
+    dos), commit `896af84`.
+
+  - **Salto brusco de CVD investigado y descartado como corte de red**:
+    fila 323 (16:39:29), -2292 -> -8886 en un solo tick de 15s (6549 trades,
+    delta_vol -6594, muy por encima del resto de ticks ~50-480). Fran
+    sugirio que podria ser un corte de red deliberado de prueba. Descartado
+    con evidencia cruzada: las velas de 1m reales descargadas por separado
+    (`historico_ETH_1m_bitget.csv`) confirman un flash-drop real esa misma
+    vela (16:39: open 1875.81, low 1866.00, volumen 21564 - 12-18x los
+    minutos vecinos), y el patron alrededor (`n_trades`/`cvd` subiendo
+    gradualmente 3 minutos antes, manteniendose elevados varios minutos
+    despues) es el de una cascada de liquidaciones organica, no un salto
+    aislado. Ademas no existe `huecos_ETH.csv` (el propio detector de
+    cortes de `grabador_libro.py`, dispara si el libro lleva >15s sin
+    actualizar y SIEMPRE registra, se recupere o no) - nunca se disparo en
+    esta sesion. El corte de red deliberado que si hizo Fran fue otro,
+    documentado mas abajo (entrada de la reescritura WS, "Fran paro 22800,
+    relanzo como 31165, desconecto el NAS...", a las 18:27 UTC) - funciono
+    como se esperaba, huecos registrados correctamente para las 3 monedas.
+
+- 2026-08-14: Primer test empirico de `imbalance` (order flow) combinado con
+  niveles de `niveles.py`, a peticion de Fran ("el imbalance nos puede
+  beneficiar, vamos a comprobarlo"). ETH 15m, mismos parametros de
+  produccion (`k=3 tolerancia-atr=0.25 toques-min=4`), niveles vigentes
+  actuales aplicados como mapa ESTATICO sobre las ~28.6h completas de
+  `flujo_ETH.csv` (~6860 ticks de 15s) - simplificacion aceptada dado que
+  es solo una primera intuicion, no un backtest formal. `imbalance`
+  bucketeado en fuerte_compra/fuerte_venta (>=0.5 / <=-0.5) vs neutro,
+  retorno futuro del `mid` a 5/15/30min.
+
+  **Resultado: sin edge separable de la tendencia con este dato.** El
+  patron "cerca de techo = retorno negativo, cerca de suelo = retorno
+  positivo" sale limpio pero aparece IGUAL en el bucket `neutro` (imbalance
+  debil) - la ventana completa fue una sola tendencia bajista + rebote
+  parcial (el mismo flash-drop de la entrada de arriba), asi que "cerca de
+  nivel" solo correlaciona con EN QUE MOMENTO de esa tendencia caia cada
+  tick, no aporta el imbalance. La comparacion que si importaria (imbalance
+  fuerte vs neutro DENTRO del mismo contexto de nivel) no sale monotona ni
+  consistente. Unico patron con pinta de real: `ctx=ambos` (techo Y suelo
+  solapados en tolerancia) + `fuerte_compra` da retorno positivo creciente
+  con el horizonte (+0.008%/+0.026%/+0.044% a 5/15/30min, ~60-62% aciertos,
+  n~300) - pero ventanas de hasta 30min sobre ticks de 15s estan muy
+  solapadas entre si (n efectivo real mucho menor) y es un solo regimen.
+  Mismo caso ya vivido con `rsi_sobreventa` cambiando de signo entre
+  regimenes (ver auditoria del Grupo A, 2026-08-13 mas abajo). **Pendiente**:
+  seguir grabando en vivo (unica via posible, no se puede backtestear con
+  historico profundo - ver auditoria de datos 2026-08-13) y repetir el
+  mismo test con mas dias/regimen variado antes de fiarse de cualquier
+  patron de aqui.
+
+- 2026-08-14: Bug de biseccion de `descargar_bit._primera_vela_ms()` (ya
+  documentado en el codigo para ETH 4h, ver su docstring) confirmado que
+  NO es un caso aislado - reproducido tambien en BTC y ETH 15m al bajar
+  `--velas` por primera vez para completar el registro de niveles local
+  (Fran: "lo tengo ya descargado del filezilla" resulto ser el mismo
+  problema, no una copia mas completa - las 3 monedas arrancan su
+  `velas/<COIN>/15m_bitget.csv` el mismo 2026-07-16, pese a que
+  `herramientas/libro/historico_ETH_15m_bitget.csv` (cache viejo de
+  `--feed`) prueba que hay datos reales de Bitget desde al menos
+  2026-05-13). La biseccion no converge del todo (tope de 50 pasos, aviso
+  en consola) y se queda con un punto "confirmado pero conservador" en vez
+  del inicio real. **Pendiente sin decidir**: si merece la pena una
+  estrategia mas robusta (reintentos con consenso cerca del borde, o partir
+  de una cota inferior conocida como la del cache de `--feed`) o se acepta
+  el margen perdido tal cual.
+
+- 2026-08-14: `niveles.py --actualizar` corrido localmente por primera vez
+  (antes solo en el NAS) para las 9 combinaciones coin/TF en produccion
+  (BTC/ETH/ICP x 15m/1h/4h) - confirma que el mecanismo incremental
+  funciona: ETH (velas locales mas frescas, hasta 20:45 UTC) avanzo 9/3/1
+  velas nuevas en 15m/1h/4h; BTC/ICP salieron "ya esta al dia" porque sus
+  `velas/<COIN>/*.csv` locales no se habian refrescado desde antes (18:30/
+  17:00/12:00) - el limite es el CSV de velas disponible, no un fallo del
+  mecanismo de actualizacion.
+
 - 2026-08-14: `ccxt.pro` (WS) no funciona en Windows sin arreglo -
   `aiodns.error.DNSError: (11, 'Could not contact DNS servers')` en la
   primera llamada HTTP real de cualquier `ccxtpro.bitget({...})` sin
