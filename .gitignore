@@ -38,6 +38,15 @@ historicos/
 # Logs de procesos lanzados en background (ej. nohup ... > libro.log &).
 *.log
 
+# 2026-08-17: parametros en caliente de mercado/indicadores.py y
+# mercado/senales.py - mismo criterio que grabador_config.json
+# (herramientas/grabador_libro/): se editan a mano o via
+# telegram_control.py mas adelante, no se suben. Si no existen, cada
+# modulo usa su PARAMS_DEFECTO tal cual (comportamiento identico al de
+# antes de que existieran estos ficheros).
+mercado/indicadores_config.json
+mercado/senales_config.json
+
 # Backup del .git corrupto anterior (ver anotaciones.md 2026-08-07) - no es
 # parte del repo, se queda en disco por si hace falta mirar algo despues.
 .git.corrupto-*/

@@ -480,7 +480,14 @@ def _toca_libro_crudo(estado, libro_crudo_cada):
 # ---------------------------------------------------------------- recuperacion de huecos
 
 UMBRAL_HUECO_SEG = 15.0  # sin actualizacion de libro en mas de esto, se asume corte
-TOPE_HUECO_SEG = 300.0  # huecos mayores de 5 min no se intentan recuperar por REST
+TOPE_HUECO_SEG = 600.0  # huecos mayores de 10 min no se intentan recuperar por REST -
+                         # subido de 300 (2026-08-17): un hueco de 347.8s en ICP tras
+                         # un relanzamiento quedo sin intentar por los pelos, y Bitget
+                         # SI tenia los trades disponibles (comprobado y recuperado a
+                         # mano, ver anotaciones.md) - 300s era mas conservador de lo
+                         # necesario para el caso tipico (reinicio del proceso), sigue
+                         # habiendo un tope para no fiarse de un historico REST que en
+                         # general no es profundo (ver mercado/datos.py.trades()).
 TOPE_LLAMADAS_RECUPERACION = 10
 TOPE_TRADES_RECUPERACION = 5000
 
@@ -604,6 +611,23 @@ async def _watch_book(exchange, coin, simbolo, estado):
     while True:
         try:
             ob = await exchange.watch_order_book(simbolo)
+            bids, asks = ob["bids"], ob["asks"]
+            if bids and asks and bids[0][0] > asks[0][0]:
+                # Libro cruzado: el estado interno que mantiene ccxt.pro se
+                # desincronizo (visto en vivo 2026-08-16: bid congelado en un
+                # unico valor entre 1h35 y ~13h mientras ask seguia
+                # actualizandose con normalidad - ver anotaciones.md). El
+                # propio checksum de ccxt (bitget.py/handle_order_book) tarda
+                # demasiado o no siempre dispara su resuscripcion solo, asi
+                # que se fuerza aqui: se descarta esta lectura (NO se guarda
+                # en estado, para que _fila() la trate como libro
+                # desactualizado via libro_ts en vez de escribir bid/ask
+                # cruzados) y se pide a ccxt que tire su copia local del
+                # libro y vuelva a suscribirse desde cero (snapshot limpio).
+                print(f"  (aviso) libro {coin}: cruzado (bid {bids[0][0]} > ask {asks[0][0]}), "
+                      f"forzando resuscripcion...")
+                await exchange.un_watch_order_book(simbolo)
+                continue
             ahora = time.monotonic()
             if estado["libro_ts"] is not None and (ahora - estado["libro_ts"]) > UMBRAL_HUECO_SEG:
                 await _recuperar_hueco(coin, simbolo, estado)

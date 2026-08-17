@@ -88,6 +88,96 @@ CAMPOS_HISTORIAL = [
     "toques", "estado", "primero", "ultimo", "pid",
 ]
 
+# Parametros en caliente para --actualizar (2026-08-17, mismo patron que
+# mercado/indicadores.py / mercado/senales.py) - SOLO para --actualizar
+# (los daemons de produccion, pensado para telegram_control.py mas
+# adelante). El modo de un tiro (comparacion manual, mas abajo en main())
+# sigue exigiendo --k/--tolerancia-atr/--toques-min explicitos como
+# siempre - ver la cabecera del fichero: ahi la idea de "sin defaults a
+# proposito" para forzar una eleccion consciente sigue siendo valida, esto
+# no la toca. Los valores de PARAMS_DEFECTO son los que ya estan validados
+# y corriendo en produccion (ver ESTADO.md).
+PARAMS_DEFECTO = {
+    "k": 3, "tolerancia_atr": 0.25, "toques_min": 4, "confirmacion_velas": 2,
+}
+
+LIMITES_PARAMS = {
+    "k": (1, 100), "tolerancia_atr": (0.01, 10.0), "toques_min": (1, 1000),
+    "confirmacion_velas": (1, 100),
+}
+
+
+def _ruta_config():
+    return os.path.join(DIR_NIVELES, "niveles_config.json")
+
+
+_cache_params = None
+_cache_mtime = None
+_cache_verificado = 0.0  # time.monotonic() de la ultima comprobacion de mtime
+
+# Minimo de segundos entre comprobaciones de mtime en disco (2026-08-17,
+# mismo motivo que mercado/indicadores.py / mercado/senales.py: el proyecto
+# vive en un share de red, y un os.path.exists()/getmtime() de mas es un
+# viaje de red de mas). Aqui _actualizar() solo llama a cargar_params() una
+# vez por vuelta del bucle --cada (60s), asi que el impacto es minimo, pero
+# se deja el mismo patron por consistencia y por si algun caller futuro lo
+# llama desde un bucle mas ajustado.
+INTERVALO_RECOMPROBAR = 2.0
+
+
+def cargar_params():
+    """PARAMS_DEFECTO + lo que haya en herramientas/niveles/niveles_config.json
+    (si existe) - cacheado por mtime (y el propio mtime solo se comprueba
+    como mucho cada INTERVALO_RECOMPROBAR segundos, ver su comentario) para
+    no releerlo/parsearlo en cada llamada. _actualizar() lo consulta en cada
+    vuelta del bucle --cada - asi que editar el JSON mientras un daemon esta
+    corriendo se recoge solo, sin reiniciar el proceso (maximo --cada
+    segundos de retraso, mas el margen de INTERVALO_RECOMPROBAR)."""
+    global _cache_params, _cache_mtime, _cache_verificado
+    ahora = time.monotonic()
+    if _cache_params is not None and (ahora - _cache_verificado) < INTERVALO_RECOMPROBAR:
+        return _cache_params
+    _cache_verificado = ahora
+
+    ruta = _ruta_config()
+    mtime = os.path.getmtime(ruta) if os.path.exists(ruta) else None
+    if _cache_params is not None and mtime == _cache_mtime:
+        return _cache_params
+
+    params = dict(PARAMS_DEFECTO)
+    if mtime is not None:
+        try:
+            with open(ruta) as f:
+                guardado = json.load(f)
+            params.update({k: v for k, v in guardado.items() if k in PARAMS_DEFECTO})
+        except (OSError, ValueError):
+            pass
+    _cache_params, _cache_mtime = params, mtime
+    return params
+
+
+def guardar_params(params):
+    """Escribe 'params' (solo claves conocidas de PARAMS_DEFECTO, dentro de
+    LIMITES_PARAMS) en niveles_config.json - pensado para
+    telegram_control.py mas adelante (de momento nada lo llama todavia).
+    Escritura atomica (tmp + os.replace), mismo patron que el resto del
+    proyecto (grabador_config.json / indicadores_config.json /
+    senales_config.json)."""
+    a_guardar = dict(cargar_params())
+    for k, v in params.items():
+        if k not in PARAMS_DEFECTO:
+            continue
+        lo, hi = LIMITES_PARAMS[k]
+        if not (lo <= v <= hi):
+            raise ValueError(f"{k}={v} fuera de rango [{lo},{hi}]")
+        a_guardar[k] = v
+    os.makedirs(DIR_NIVELES, exist_ok=True)
+    ruta = _ruta_config()
+    tmp = ruta + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(a_guardar, f)
+    os.replace(tmp, ruta)
+
 # Bitget, NO Binance (2026-08-07, correccion de Fran): los niveles se
 # vigilan en vivo contra el precio de Bitget (mercado/datos.py, el mismo
 # exchange que opera monitor.py) - calcularlos sobre velas de otro exchange
@@ -391,140 +481,154 @@ def _crear_listado(coin, tf, k, tolerancia_atr, toques_min, confirmacion_velas):
           f"{_ruta_listado(coin, tf)}")
 
 
-def _actualizar_listado_con_vela(niveles, vela, tolerancia, confirmacion_velas, writer, log, coin, tf):
-    """Actualiza el ESTADO de los niveles ya conocidos con UNA vela nueva -
-    reproduce las mismas dos reglas que ya usan _contar_toques (agrupar
-    toques por entrar/salir de tolerancia) y _evaluar_estado
-    (confirmacion_velas cierres consecutivos para romper; primer retoque
-    tras rotura = flip), pero aplicadas incrementalmente: O(niveles
-    conocidos) por vela, sin re-escanear nada del historico."""
-    ts, alto, bajo, cierre = vela[0], vela[2], vela[3], vela[4]
-    for niv in niveles:
-        if niv["estado"] == "flip":
-            continue  # terminal, igual que _evaluar_estado - no sigue vigilando tras el flip
-
-        cerca = (bajo - tolerancia) <= niv["precio"] <= (alto + tolerancia)
-        if cerca:
-            if not niv["dentro"]:
-                niv["toques"] += 1
-                niv["dentro"] = True
-                if niv["estado"] == "roto":
-                    niv["estado"] = "flip"
-                    _anotar_historial(writer, log, coin, tf, "flip", niv)
-                else:
-                    _anotar_historial(writer, log, coin, tf, "toque", niv)
-            niv["ultimo"] = ts
-        else:
-            niv["dentro"] = False
-
-        if niv["estado"] == "vivo":
-            cruzo = (cierre > niv["precio"] + tolerancia if niv["tipo"] == "techo"
-                     else cierre < niv["precio"] - tolerancia)
-            niv["consecutivos"] = niv["consecutivos"] + 1 if cruzo else 0
-            if niv["consecutivos"] >= confirmacion_velas:
-                niv["estado"] = "roto"
-                _anotar_historial(writer, log, coin, tf, "rotura", niv)
-
-
-def _nuevo_candidato(velas_todas, j, k, tolerancia, toques_min, niveles_existentes):
-    """Comprueba si la vela en indice j (necesita k velas ya disponibles a
-    cada lado en velas_todas) es un extremo local NUEVO - mismo criterio
-    que indicadores.extremos_locales() pero para un solo punto, O(k). Si
-    lo es y no coincide con un nivel ya conocido del mismo tipo (dentro de
-    tolerancia - mismo criterio de _fusionar), cuenta sus toques sobre el
-    historico ya cargado en memoria (velas_todas) - una sola vez por
-    candidato nuevo, no en cada vela; los candidatos nuevos son raros
-    (hace falta dominar 2k+1 velas), asi que esto se mantiene barato en
-    conjunto aunque cada scan individual sea O(n). Devuelve una lista de
-    0, 1 o 2 dicts de nivel nuevo (listos para anadir al listado)."""
-    alto_j, bajo_j = velas_todas[j][2], velas_todas[j][3]
-    vecinos_altos = [velas_todas[x][2] for x in range(j - k, j + k + 1) if x != j]
-    vecinos_bajos = [velas_todas[x][3] for x in range(j - k, j + k + 1) if x != j]
-
-    candidatos = []
-    if alto_j >= max(vecinos_altos):
-        candidatos.append(("techo", alto_j))
-    if bajo_j <= min(vecinos_bajos):
-        candidatos.append(("suelo", bajo_j))
-
-    nuevos = []
-    for tipo, precio in candidatos:
-        ya_existe = any(n["tipo"] == tipo and abs(n["precio"] - precio) <= tolerancia
-                        for n in niveles_existentes)
-        if ya_existe:
+def _anotar_diferencias(niveles_viejos, niveles_nuevos, tolerancia, writer, log, coin, tf):
+    """Compara el listado anterior con un analisis fresco (mismos datos
+    actuales, misma tolerancia ya usada para producir 'niveles_nuevos') y
+    anota en el historial SOLO los eventos genuinos desde la ultima vez:
+    'nivel_nuevo' para los que no tenian pareja en el listado anterior,
+    'toque' cuando el timestamp del ultimo toque avanzo, 'rotura'/'flip'
+    cuando cambia el estado. El conteo de toques en si se corrige en
+    silencio al guardar el listado nuevo (es una correccion de
+    contabilidad del recalculo, no un evento de mercado nuevo) - no se
+    reescribe como una racha de eventos 'toque' sinteticos solo porque el
+    recalculo haya reagrupado clusters de otra forma (ver anotaciones.md,
+    2026-08-17: asi era como divergia la version incremental antigua).
+    Devuelve (n_nuevos, n_toques, n_transiciones, n_desaparecidos)."""
+    usados = set()
+    n_nuevos = n_toques = n_transiciones = 0
+    for nuevo in niveles_nuevos:
+        pareja = None
+        for i, viejo in enumerate(niveles_viejos):
+            if i in usados or viejo["tipo"] != nuevo["tipo"]:
+                continue
+            if abs(viejo["precio"] - nuevo["precio"]) <= tolerancia:
+                pareja = i
+                break
+        if pareja is None:
+            _anotar_historial(writer, log, coin, tf, "nivel_nuevo", nuevo)
+            n_nuevos += 1
             continue
-        toques, primero, ultimo = _contar_toques(velas_todas, precio, tolerancia)
-        if toques >= toques_min:
-            nuevos.append(dict(tipo=tipo, precio=precio, toques=toques, primero=primero,
-                               ultimo=ultimo, estado="vivo", dentro=False, consecutivos=0))
-    return nuevos
+        usados.add(pareja)
+        viejo = niveles_viejos[pareja]
+        if nuevo["estado"] != viejo["estado"] and nuevo["estado"] in ("roto", "flip"):
+            _anotar_historial(writer, log, coin, tf,
+                              "flip" if nuevo["estado"] == "flip" else "rotura", nuevo)
+            n_transiciones += 1
+        elif nuevo["estado"] == viejo["estado"] and nuevo["ultimo"] > viejo["ultimo"]:
+            _anotar_historial(writer, log, coin, tf, "toque", nuevo)
+            n_toques += 1
+
+    n_desaparecidos = len(niveles_viejos) - len(usados)
+    return n_nuevos, n_toques, n_transiciones, n_desaparecidos
 
 
-def _actualizar(coin, tf, k, tolerancia_atr, toques_min, confirmacion_velas):
-    """--actualizar: si no hay listado previo, o si cambio algun parametro
-    respecto al guardado (Fran: 'solo lo haria si se cambiase algun
-    parametro'), rehace el barrido completo desde cero (_crear_listado).
-    Si el listado existe con los MISMOS parametros, solo procesa las velas
-    nuevas desde la ultima vez, actualizando estados (barato) y detectando
-    posibles niveles nuevos (barato, ver _nuevo_candidato) - nunca vuelve
-    a recalcular lo ya anotado."""
+_verificado_esta_sesion = set()  # {(coin, tf)} - ver _actualizar()
+
+
+def _actualizar(coin, tf, k=None, tolerancia_atr=None, toques_min=None, confirmacion_velas=None):
+    """--actualizar: SIEMPRE recalcula el analisis completo (detectar_niveles
+    + evaluar_estado sobre TODO el historico actual, via _analizar() - la
+    misma funcion que usa el modo de un tiro) en vez de actualizar
+    incrementalmente.
+
+    Arreglo de dos bugs reales encontrados el 2026-08-17 auditando
+    listado_<TF>.json contra un recalculo fresco (ver anotaciones.md):
+      1. atr_ref/tolerancia se congelaban en el valor del primer barrido y
+         nunca se refrescaban aunque siguieran llegando velas nuevas.
+      2. La fusion de niveles incremental (_nuevo_candidato, anadia
+         candidatos en el orden en que se descubrian con el tiempo) no
+         convergia con la fusion por lotes (_fusionar, agrupa TODOS los
+         candidatos a la vez ordenados por precio) - divergian incluso
+         fijando la misma tolerancia.
+    Recalcular entero cada vez elimina los dos de raiz: lo persistido pasa
+    a ser siempre exactamente lo que saldria de analizar hoy desde cero,
+    por construccion. Para los TF en produccion (15m/1h/4h, unos pocos
+    miles de velas) esto sigue siendo barato (por debajo de 1s, medido en
+    vivo) - si se amplia a 1m/3m/5m (decenas de miles de velas, muchos mas
+    candidatos) medir de nuevo antes de asumir que sigue siendo gratis.
+
+    La PRIMERA llamada de cada (coin, tf) en esta ejecucion del proceso
+    fuerza el recalculo aunque no haya velas nuevas desde el listado
+    guardado (_verificado_esta_sesion) - bug real visto en vivo 2026-08-17:
+    al relanzar los 9 procesos para recoger este mismo fix, ninguno llego a
+    corregir nada porque justo no habia entrado ninguna vela nueva desde el
+    ultimo tick del proceso viejo, y el atajo de "ya esta al dia" (pensado
+    solo para no repetir trabajo DENTRO de una misma ejecucion) se disparaba
+    antes de reconciliar el listado viejo (posiblemente divergente, de una
+    version anterior del algoritmo) contra un recalculo fresco. Las
+    siguientes llamadas de ese mismo (coin, tf) SI respetan el atajo
+    normalmente.
+
+    k/tolerancia_atr/toques_min/confirmacion_velas: si se omiten (None),
+    se toman de niveles_config.json via cargar_params() - ver su
+    docstring. Si se pasan explicitos (linea de comandos), ganan sobre el
+    json, igual que siempre."""
+    clave_sesion = (coin, tf)
+    forzar_recalculo = clave_sesion not in _verificado_esta_sesion
+    _verificado_esta_sesion.add(clave_sesion)
+
+    params_actuales = cargar_params()
+    if k is None:
+        k = params_actuales["k"]
+    if tolerancia_atr is None:
+        tolerancia_atr = params_actuales["tolerancia_atr"]
+    if toques_min is None:
+        toques_min = params_actuales["toques_min"]
+    if confirmacion_velas is None:
+        confirmacion_velas = params_actuales["confirmacion_velas"]
+
     params_nuevos = dict(k=k, tolerancia_atr=tolerancia_atr, toques_min=toques_min,
                          confirmacion_velas=confirmacion_velas)
-    estado = _cargar_listado(coin, tf)
+    listado_anterior = _cargar_listado(coin, tf)
 
-    if estado is None:
+    if listado_anterior is None:
         print(f"Sin listado previo para {coin.upper()} {tf} - barrido inicial.")
         _crear_listado(coin, tf, k, tolerancia_atr, toques_min, confirmacion_velas)
         return
 
-    if estado["params"] != params_nuevos:
+    if listado_anterior["params"] != params_nuevos:
         print(f"Parametros distintos a los del listado guardado "
-              f"({estado['params']} -> {params_nuevos}) - se rehace desde cero.")
-        _crear_listado(coin, tf, k, tolerancia_atr, toques_min, confirmacion_velas)
-        return
+              f"({listado_anterior['params']} -> {params_nuevos}) - se recalcula con los nuevos.")
 
-    velas_todas, _ = _cargar_velas(coin, tf, desde_dias=None)
-    if not velas_todas:
+    r = _analizar(coin, tf, k, tolerancia_atr, toques_min, desde_dias=None,
+                  confirmacion_velas=confirmacion_velas)
+    velas = r["velas"]
+    if not velas:
         print(f"  {coin.upper()} {tf}: sin velas disponibles.")
         return
 
-    ultimo_ts_procesado = estado["ultimo_ts_procesado"]
-    nuevas_idx = [i for i, v in enumerate(velas_todas) if v[0] > ultimo_ts_procesado]
-    if not nuevas_idx:
+    if (not forzar_recalculo
+            and velas[-1][0] <= listado_anterior["ultimo_ts_procesado"]
+            and listado_anterior["params"] == params_nuevos):
         print(f"  {coin.upper()} {tf} ya esta al dia (ultima vela procesada "
-              f"{_fmt_fecha(ultimo_ts_procesado)}).")
+              f"{_fmt_fecha(listado_anterior['ultimo_ts_procesado'])}).")
         return
-
-    niveles = estado["niveles"]
-    tolerancia = estado["tolerancia"]
 
     writer, log = _abrir_historial(coin, tf)
     try:
-        for i in nuevas_idx:
-            vela = velas_todas[i]
-            _actualizar_listado_con_vela(niveles, vela, tolerancia, confirmacion_velas,
-                                         writer, log, coin, tf)
-            j = i - k
-            if k <= j < len(velas_todas) - k:
-                for niv_nuevo in _nuevo_candidato(velas_todas, j, k, tolerancia, toques_min, niveles):
-                    niveles.append(niv_nuevo)
-                    _anotar_historial(writer, log, coin, tf, "nivel_nuevo", niv_nuevo)
+        n_nuevos, n_toques, n_transiciones, n_desaparecidos = _anotar_diferencias(
+            listado_anterior["niveles"], r["niveles"], r["tolerancia"], writer, log, coin, tf)
     finally:
         log.close()
 
-    _guardar_listado(coin, tf, params_nuevos, estado["atr_ref"], tolerancia,
-                     velas_todas[-1][0], niveles)
-    print(f"  [OK] {coin.upper()} {tf}: {len(nuevas_idx)} velas nuevas procesadas, "
-          f"{len(niveles)} niveles en el listado.")
+    _guardar_listado(coin, tf, params_nuevos, r["atr_ref"], r["tolerancia"], velas[-1][0], r["niveles"])
+    aviso_desaparecidos = f", {n_desaparecidos} ya no reproducibles (se sueltan)" if n_desaparecidos else ""
+    print(f"  [OK] {coin.upper()} {tf}: recalculado ({len(velas)} velas) - {len(r['niveles'])} niveles "
+          f"({n_nuevos} nuevos, {n_toques} con toque nuevo, {n_transiciones} con cambio de "
+          f"estado{aviso_desaparecidos}).")
 
 
 def _feed_niveles(coin, tf, k, tolerancia_atr, toques_min, confirmacion_velas, cada):
     """Modo daemon para --actualizar (2026-08-14): llama a _actualizar() en
     bucle cada 'cada' segundos - mismo patron que _feed_velas() en
-    descargar_bit.py. _actualizar() ya es barata cuando no hay velas
-    nuevas ('ya esta al dia', sin recalcular nada) - el barrido caro solo
-    ocurre en la primera vuelta (o si cambian los parametros), asi que
-    este bucle no tiene coste real la mayoria de las veces."""
+    descargar_bit.py. _actualizar() ya es barata cuando no hay velas nuevas
+    ('ya esta al dia', sin recalcular nada); cuando SI las hay, recalcula
+    el analisis completo cada vez (2026-08-17, ver docstring de
+    _actualizar) - barato para los TF en produccion (15m/1h/4h), medido en
+    vivo por debajo de 1s. Los parametros que se pasen como None se
+    resuelven contra niveles_config.json EN CADA VUELTA (cargar_params()
+    cacheado por mtime) - editar el JSON mientras este bucle esta
+    corriendo se recoge solo, sin reiniciar el proceso."""
     print(f"Feed de niveles: {coin.upper()} {tf} (cada={cada:.0f}s). Ctrl+C para parar.")
     try:
         while True:
@@ -570,12 +674,17 @@ def main():
         args = args[1:]
         if len(args) < 2:
             print("Uso: python niveles.py --actualizar <coin> <tf> "
-                  "--k .. --tolerancia-atr .. --toques-min .. [--confirmacion-velas 2] [--cada segundos]")
+                  "[--k ..] [--tolerancia-atr ..] [--toques-min ..] [--confirmacion-velas ..] [--cada segundos]")
+            print("Los 4 primeros son opcionales - si se omiten se toman de "
+                  f"{_ruta_config()} (o de PARAMS_DEFECTO si ese fichero no existe).")
             return
         coin, tf = args[0], args[1]
         resto = args[2:]
-        k = tolerancia_atr = toques_min = None
-        confirmacion_velas = 2
+        # None = tomar de niveles_config.json (ver cargar_params/_actualizar) -
+        # a diferencia del modo de un tiro de mas abajo, --actualizar SI puede
+        # omitirlos (pensado para telegram_control.py, ver cabecera del
+        # bloque PARAMS_DEFECTO mas arriba en el fichero).
+        k = tolerancia_atr = toques_min = confirmacion_velas = None
         cada = None
         i = 0
         while i < len(resto):
@@ -590,10 +699,6 @@ def main():
             elif resto[i] == "--cada":
                 i += 1; cada = float(resto[i])
             i += 1
-        if k is None or tolerancia_atr is None or toques_min is None:
-            print("Faltan parametros obligatorios: --k, --tolerancia-atr, --toques-min")
-            print("(sin defaults a proposito - ver cabecera del archivo)")
-            return
         if cada is None:
             _actualizar(coin, tf, k, tolerancia_atr, toques_min, confirmacion_velas)
         else:

@@ -1,11 +1,124 @@
 # ---------------------------------------------------------------
 # indicadores.py - Capa 2: Indicadores técnicos parametrizables
 # Versión Fusionada: Optimizaciones O(N) + Análisis Estructural
+#
+# Parametros en caliente (2026-08-17): cada funcion sigue aceptando su(s)
+# periodo(s) explicitos como siempre, pero si se omiten (None, el nuevo
+# default) se toman de PARAMS_DEFECTO, sobreescribible sin tocar codigo via
+# indicadores_config.json (mismo patron que ya usa
+# herramientas/grabador_libro.py: PARAMS_DEFECTO/LIMITES_PARAMS/
+# _cargar_config - aqui publico, cargar_params()/guardar_params(), porque
+# este modulo lo importan otros (mercado/senales.py) y mas adelante
+# tambien telegram_control.py para el ajuste en caliente). De momento
+# NADA escribe en el JSON ni esta conectado a telegram - solo se lee si el
+# fichero ya existe, si no existe se comporta exactamente igual que antes.
 # ---------------------------------------------------------------
 
+import json
 import math
+import os
+import time
 
-def sma(cierres, periodo=20):
+PARAMS_DEFECTO = {
+    "sma_periodo": 20,
+    "ema_periodo": 12,
+    "rsi_periodo": 14,
+    "bb_periodo": 20, "bb_desviaciones": 2,
+    "atr_periodo": 14,
+    "adx_periodo": 14,
+    "rvol_periodo": 20,
+    "extremos_k": 3,
+    "macd_rapido": 12, "macd_lento": 26, "macd_senal": 9,
+}
+
+LIMITES_PARAMS = {
+    "sma_periodo": (1, 500),
+    "ema_periodo": (1, 500),
+    "rsi_periodo": (1, 500),
+    "bb_periodo": (1, 500), "bb_desviaciones": (0.1, 10.0),
+    "atr_periodo": (1, 500),
+    "adx_periodo": (1, 500),
+    "rvol_periodo": (1, 500),
+    "extremos_k": (1, 100),
+    "macd_rapido": (1, 500), "macd_lento": (1, 500), "macd_senal": (1, 500),
+}
+
+
+def _ruta_config():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "indicadores_config.json")
+
+
+_cache_params = None
+_cache_mtime = None
+_cache_verificado = 0.0  # time.monotonic() de la ultima comprobacion de mtime
+
+# Minimo de segundos entre comprobaciones de mtime en disco (2026-08-17,
+# bug real en vivo): el proyecto vive en un share de red (NAS) - un
+# os.path.exists()/getmtime() individual es barato en local, pero por SMB
+# cada uno es un viaje de red. detectar()/indicadores.atr()/rsi() se llaman
+# UNA VEZ POR VELA en un backtest (herramientas/backtest_senales.py: cientos
+# de miles de velas en el historico completo de Binance) - sin este
+# throttle, cargar_params() hacia ese viaje de red en CADA vela (varias
+# veces por vela, contando las llamadas encadenadas desde senales.py),
+# convirtiendo un backtest de segundos en uno de horas. Con 2s de margen,
+# un cambio en el JSON tarda como mucho eso en notarse - imperceptible para
+# edicion manual o via telegram, y de sobra para el caso vivo (--cada de
+# grabador_libro.py/niveles.py son de 15-60s).
+INTERVALO_RECOMPROBAR = 2.0
+
+
+def cargar_params():
+    """PARAMS_DEFECTO + lo que haya en indicadores_config.json (si existe) -
+    cacheado por mtime del fichero (y el propio mtime solo se comprueba como
+    mucho cada INTERVALO_RECOMPROBAR segundos, ver su comentario) para no
+    releerlo/parsearlo en cada llamada (indicadores.py ya avisa en
+    mercado/senales.py de que ATR/RSI son O(N) y se recalculan enteros en
+    cada llamada si el caller no lleva su propio cache)."""
+    global _cache_params, _cache_mtime, _cache_verificado
+    ahora = time.monotonic()
+    if _cache_params is not None and (ahora - _cache_verificado) < INTERVALO_RECOMPROBAR:
+        return _cache_params
+    _cache_verificado = ahora
+
+    ruta = _ruta_config()
+    mtime = os.path.getmtime(ruta) if os.path.exists(ruta) else None
+    if _cache_params is not None and mtime == _cache_mtime:
+        return _cache_params
+
+    params = dict(PARAMS_DEFECTO)
+    if mtime is not None:
+        try:
+            with open(ruta) as f:
+                guardado = json.load(f)
+            params.update({k: v for k, v in guardado.items() if k in PARAMS_DEFECTO})
+        except (OSError, ValueError):
+            pass
+    _cache_params, _cache_mtime = params, mtime
+    return params
+
+
+def guardar_params(params):
+    """Escribe 'params' (solo claves conocidas de PARAMS_DEFECTO, dentro de
+    LIMITES_PARAMS) en indicadores_config.json - pensado para
+    telegram_control.py mas adelante (de momento nada lo llama todavia).
+    Escritura atomica (tmp + os.replace), mismo patron que
+    herramientas/grabador_libro.py._guardar_config."""
+    a_guardar = dict(cargar_params())
+    for k, v in params.items():
+        if k not in PARAMS_DEFECTO:
+            continue
+        lo, hi = LIMITES_PARAMS[k]
+        if not (lo <= v <= hi):
+            raise ValueError(f"{k}={v} fuera de rango [{lo},{hi}]")
+        a_guardar[k] = v
+    ruta = _ruta_config()
+    tmp = ruta + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(a_guardar, f)
+    os.replace(tmp, ruta)
+
+
+def sma(cierres, periodo=None):
     """Simple Moving Average (SMA) - Optimizado O(N).
 
     Calcula la media aritmética de los precios en una ventana dada.
@@ -18,6 +131,8 @@ def sma(cierres, periodo=20):
     Returns:
         list[float]: SMA para cada punto (None para puntos sin suficiente historia)
     """
+    if periodo is None:
+        periodo = cargar_params()["sma_periodo"]
     n = len(cierres)
     if n < periodo or periodo <= 0:
         return [None] * n
@@ -33,7 +148,7 @@ def sma(cierres, periodo=20):
     return resultado
 
 
-def ema(cierres, periodo=12):
+def ema(cierres, periodo=None):
     """Exponential Moving Average (EMA).
 
     Media móvil que otorga más peso a los datos recientes. 
@@ -41,11 +156,13 @@ def ema(cierres, periodo=12):
 
     Args:
         cierres: list[float]
-        periodo: int (default 12)
+        periodo: int (default: indicadores_config.json / PARAMS_DEFECTO['ema_periodo'], 12)
 
     Returns:
         list[float]: EMA para cada punto
     """
+    if periodo is None:
+        periodo = cargar_params()["ema_periodo"]
     n = len(cierres)
     if n < periodo or periodo <= 0:
         return [None] * n
@@ -65,7 +182,7 @@ def ema(cierres, periodo=12):
     return resultado
 
 
-def rsi(cierres, periodo=14):
+def rsi(cierres, periodo=None):
     """Relative Strength Index (RSI) con Suavizado de Wilder O(N).
 
     Mide la velocidad y el cambio de los movimientos de precios.
@@ -73,11 +190,13 @@ def rsi(cierres, periodo=14):
 
     Args:
         cierres: list[float]
-        periodo: int (default 14)
+        periodo: int (default: indicadores_config.json / PARAMS_DEFECTO['rsi_periodo'], 14)
 
     Returns:
         list[float]: RSI 0-100 para cada punto
     """
+    if periodo is None:
+        periodo = cargar_params()["rsi_periodo"]
     n = len(cierres)
     if n < periodo + 1 or periodo <= 0:
         return [None] * n
@@ -123,7 +242,7 @@ def rsi(cierres, periodo=14):
     return resultado
 
 
-def bollinger_bands(cierres, periodo=20, desviaciones=2):
+def bollinger_bands(cierres, periodo=None, desviaciones=None):
     """Bollinger Bands: media ± desviaciones estándar - Optimizado O(N).
 
     Utiliza un algoritmo de suma flotante para la varianza, permitiendo
@@ -131,8 +250,8 @@ def bollinger_bands(cierres, periodo=20, desviaciones=2):
 
     Args:
         cierres: list[float]
-        periodo: int (ventana SMA, default 20)
-        desviaciones: float (multiplicador de std, default 2)
+        periodo: int (ventana SMA, default: indicadores_config.json / PARAMS_DEFECTO['bb_periodo'], 20)
+        desviaciones: float (multiplicador de std, default: PARAMS_DEFECTO['bb_desviaciones'], 2)
 
     Returns:
         dict: {
@@ -141,6 +260,12 @@ def bollinger_bands(cierres, periodo=20, desviaciones=2):
             'inferior': list[float]
         }
     """
+    if periodo is None or desviaciones is None:
+        params = cargar_params()
+        if periodo is None:
+            periodo = params["bb_periodo"]
+        if desviaciones is None:
+            desviaciones = params["bb_desviaciones"]
     n = len(cierres)
     if n < periodo or periodo <= 0:
         return {
@@ -179,18 +304,20 @@ def bollinger_bands(cierres, periodo=20, desviaciones=2):
     }
 
 
-def atr(altos, bajos, cierres, periodo=14):
+def atr(altos, bajos, cierres, periodo=None):
     """Average True Range (ATR): mide volatilidad con Suavizado de Wilder O(N).
 
     Sirve para fijar stops y objetivos dinámicos proporcionales a la volatilidad.
 
     Args:
         altos, bajos, cierres: list[float] (mismo largo)
-        periodo: int (default 14)
+        periodo: int (default: indicadores_config.json / PARAMS_DEFECTO['atr_periodo'], 14)
 
     Returns:
         list[float]: ATR alineado con las velas
     """
+    if periodo is None:
+        periodo = cargar_params()["atr_periodo"]
     n = len(cierres)
     resultado = [None] * n
     if n < periodo + 1 or periodo <= 0:
@@ -212,7 +339,7 @@ def atr(altos, bajos, cierres, periodo=14):
     return resultado
 
 
-def adx(altos, bajos, cierres, periodo=14):
+def adx(altos, bajos, cierres, periodo=None):
     """Average Directional Index (ADX) + DI+ / DI-.
 
     ADX mide la fuerza de la tendencia, mientras que DI+ y DI- dan la dirección.
@@ -220,11 +347,13 @@ def adx(altos, bajos, cierres, periodo=14):
 
     Args:
         altos, bajos, cierres: list[float] (una por vela)
-        periodo: int (default 14)
+        periodo: int (default: indicadores_config.json / PARAMS_DEFECTO['adx_periodo'], 14)
 
     Returns:
         dict: {'adx': [...], 'di_mas': [...], 'di_menos': [...]}
     """
+    if periodo is None:
+        periodo = cargar_params()["adx_periodo"]
     n = len(cierres)
     resultado = {
         'adx': [None] * n,
@@ -279,7 +408,66 @@ def adx(altos, bajos, cierres, periodo=14):
     return resultado
 
 
-def rvol(volumenes, periodo=20):
+def macd(cierres, rapido=None, lento=None, senal=None):
+    """MACD (Moving Average Convergence/Divergence).
+
+    Diferencia entre una EMA rápida y una EMA lenta ('linea_macd'), más su
+    propia EMA ('linea_senal') - el histograma (linea_macd - linea_senal)
+    cruzando cero, o linea_macd cruzando linea_senal, son las lecturas
+    clásicas de cambio de momentum. Reutiliza ema() (misma inicialización
+    por SMA, mismo criterio de precisión que el resto del módulo).
+
+    Args:
+        cierres: list[float]
+        rapido: int (periodo EMA rápida, default: indicadores_config.json / PARAMS_DEFECTO['macd_rapido'], 12)
+        lento: int (periodo EMA lenta, default: PARAMS_DEFECTO['macd_lento'], 26)
+        senal: int (periodo EMA de linea_macd, default: PARAMS_DEFECTO['macd_senal'], 9)
+
+    Returns:
+        dict: {'macd': [...], 'senal': [...], 'histograma': [...]}
+    """
+    if rapido is None or lento is None or senal is None:
+        params = cargar_params()
+        if rapido is None:
+            rapido = params["macd_rapido"]
+        if lento is None:
+            lento = params["macd_lento"]
+        if senal is None:
+            senal = params["macd_senal"]
+
+    n = len(cierres)
+    vacio = {'macd': [None] * n, 'senal': [None] * n, 'histograma': [None] * n}
+    if n < lento or rapido <= 0 or lento <= 0 or senal <= 0:
+        return vacio
+
+    ema_rapida = ema(cierres, rapido)
+    ema_lenta = ema(cierres, lento)
+    linea_macd = [
+        (er - el) if (er is not None and el is not None) else None
+        for er, el in zip(ema_rapida, ema_lenta)
+    ]
+
+    # la EMA de la señal solo puede arrancar donde linea_macd empieza a
+    # tener valores reales (a partir de 'lento' velas, la EMA mas tardia de
+    # las dos) - se le pasa a ema() la sub-serie ya sin None por delante,
+    # y se recoloca el resultado en su posicion real dentro de la serie
+    # completa.
+    primer_valido = next((i for i, v in enumerate(linea_macd) if v is not None), None)
+    if primer_valido is None or (n - primer_valido) < senal:
+        return {'macd': linea_macd, 'senal': [None] * n, 'histograma': [None] * n}
+
+    ema_senal_sub = ema(linea_macd[primer_valido:], senal)
+    linea_senal = [None] * primer_valido + ema_senal_sub
+
+    histograma = [
+        (m - s) if (m is not None and s is not None) else None
+        for m, s in zip(linea_macd, linea_senal)
+    ]
+
+    return {'macd': linea_macd, 'senal': linea_senal, 'histograma': histograma}
+
+
+def rvol(volumenes, periodo=None):
     """RVOL (Relative Volume): volumen de cada vela sobre la media de las
     'periodo' velas anteriores (sin incluir la propia) - Optimizado O(N).
 
@@ -290,12 +478,14 @@ def rvol(volumenes, periodo=20):
 
     Args:
         volumenes: list[float] (volumen de cada vela, mismo orden que velas)
-        periodo: int (velas anteriores a promediar, default 20)
+        periodo: int (velas anteriores a promediar, default: indicadores_config.json / PARAMS_DEFECTO['rvol_periodo'], 20)
 
     Returns:
         list[float]: RVOL alineado con 'volumenes' (None sin suficiente
         historia, o si la media de la ventana da 0)
     """
+    if periodo is None:
+        periodo = cargar_params()["rvol_periodo"]
     n = len(volumenes)
     if n < periodo + 1 or periodo <= 0:
         return [None] * n
@@ -311,7 +501,7 @@ def rvol(volumenes, periodo=20):
     return resultado
 
 
-def extremos_locales(velas, k=3):
+def extremos_locales(velas, k=None):
     """Identifica Swing Highs y Swing Lows para análisis estructural.
 
     Un swing high es una vela cuyo alto domina a las k velas de cada lado.
@@ -319,11 +509,13 @@ def extremos_locales(velas, k=3):
 
     Args:
         velas: list de [timestamp, open, high, low, close, vol]
-        k: velas vecinas a cada lado que debe dominar (default 3)
+        k: velas vecinas a cada lado que debe dominar (default: indicadores_config.json / PARAMS_DEFECTO['extremos_k'], 3)
 
     Returns:
         (indices_altos, indices_bajos): list[int], indices dentro de 'velas'
     """
+    if k is None:
+        k = cargar_params()["extremos_k"]
     n = len(velas)
     altos, bajos = [], []
     for j in range(k, n - k):

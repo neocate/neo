@@ -375,6 +375,48 @@ def _escribir_filas(f, velas):
         w.writerow([t, fecha, o, h, l, c, vol])
 
 
+def _reemplazar_ultima_fila(ruta, vela):
+    """Sobrescribe la ultima fila de 'ruta' con 'vela', sin releer el fichero
+    entero (localiza el salto de linea anterior igual que
+    _ultimo_timestamp_ms, sobre los ultimos 64KB). Usado por _anexar_nuevas
+    cuando Bitget devuelve otra vez, actualizada, la vela que se habia
+    guardado como 'ultima cerrada' - hasta_ms/since deberian excluir la vela
+    EN CURSO, pero en vivo (2026-08-14/16) se ha visto el mismo timestamp
+    con OHLCV distinto entre llamadas sucesivas (open/high/low iguales,
+    close/volumen crecientes) - la vela seguia formandose cuando se guardo
+    la vez anterior. Ver anotaciones.md."""
+    with open(ruta, 'rb') as f:
+        f.seek(0, os.SEEK_END)
+        tam = f.tell()
+        f.seek(max(0, tam - 65536))
+        inicio_bloque = f.tell()
+        cola = f.read()
+    contenido = cola.rstrip(b'\r\n')
+    salto_previo = contenido.rfind(b'\n')
+    offset = inicio_bloque + (salto_previo + 1 if salto_previo != -1 else 0)
+    with open(ruta, 'r+', newline='') as f:
+        f.seek(offset)
+        f.truncate()
+        _escribir_filas(f, [vela])
+
+
+def _anexar_nuevas(ruta, nuevas, ultimo_ts):
+    """Añade 'nuevas' (ordenadas, ya filtradas hasta hasta_ms) al final de
+    'ruta'. Si la primera vela nueva coincide con 'ultimo_ts' o es anterior
+    (la vela EN CURSO colandose otra vez pese a since/hasta_ms, ver
+    _reemplazar_ultima_fila), se sobreescribe la ultima fila del fichero en
+    vez de duplicarla. Devuelve (velas_realmente_nuevas, corregida)."""
+    corregida = False
+    if nuevas and nuevas[0][0] <= ultimo_ts:
+        _reemplazar_ultima_fila(ruta, nuevas[0])
+        nuevas = nuevas[1:]
+        corregida = True
+    if nuevas:
+        with open(ruta, 'a', newline='') as f:
+            _escribir_filas(f, nuevas)
+    return nuevas, corregida
+
+
 def descargar(coin, timeframe, desde=None, limite_req=200):
     """Descarga completa (o desde 'desde'), SIEMPRE reescribe el fichero
     entero. Para refrescar sin perder lo ya bajado usar actualizar()."""
@@ -438,10 +480,13 @@ def actualizar(coin, timeframe, dias_objetivo=DIAS_OBJETIVO, limite_req=200):
         if ultimo_ts + tf_ms < hasta_ms:
             nuevas = _descargar_rango(cliente, simbolo, timeframe, since, hasta_ms, limite_req)
             if nuevas:
-                with open(ruta, 'a', newline='') as f:
-                    _escribir_filas(f, nuevas)
-                print(f"  [OK] {simbolo} {timeframe}: +{len(nuevas)} velas "
-                      f"(hasta {datetime.fromtimestamp(nuevas[-1][0]/1000, timezone.utc):%Y-%m-%d %H:%M} UTC)")
+                restantes, corregida = _anexar_nuevas(ruta, nuevas, ultimo_ts)
+                sufijo = " (+ ultima vela corregida, seguia en curso)" if corregida else ""
+                if restantes:
+                    print(f"  [OK] {simbolo} {timeframe}: +{len(restantes)} velas{sufijo} "
+                          f"(hasta {datetime.fromtimestamp(restantes[-1][0]/1000, timezone.utc):%Y-%m-%d %H:%M} UTC)")
+                elif corregida:
+                    print(f"  [OK] {simbolo} {timeframe}: ultima vela corregida (seguia en curso).")
 
     _recortar_si_hace_falta(ruta, velas_objetivo)
     return ruta
@@ -491,10 +536,13 @@ def actualizar_velas(coin, timeframe, limite_req=200):
             if not nuevas:
                 print(f"  {simbolo} {timeframe}: no hay velas nuevas todavia.")
                 return ruta
-            with open(ruta, 'a', newline='') as f:
-                _escribir_filas(f, nuevas)
-            print(f"  [OK] {simbolo} {timeframe}: +{len(nuevas)} velas "
-                  f"(hasta {datetime.fromtimestamp(nuevas[-1][0]/1000, timezone.utc):%Y-%m-%d %H:%M} UTC)")
+            restantes, corregida = _anexar_nuevas(ruta, nuevas, ultimo_ts)
+            sufijo = " (+ ultima vela corregida, seguia en curso)" if corregida else ""
+            if restantes:
+                print(f"  [OK] {simbolo} {timeframe}: +{len(restantes)} velas{sufijo} "
+                      f"(hasta {datetime.fromtimestamp(restantes[-1][0]/1000, timezone.utc):%Y-%m-%d %H:%M} UTC)")
+            elif corregida:
+                print(f"  [OK] {simbolo} {timeframe}: ultima vela corregida (seguia en curso).")
     return ruta
 
 
