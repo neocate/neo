@@ -245,6 +245,10 @@ def _crear_estado(cvd_previo):
         "ids_recientes": {},
         "n_trades_fila": 0, "vol_buy_fila": 0.0, "vol_sell_fila": 0.0,
         "libro_crudo_ultimo": 0.0,
+        "trades_ts": None,
+        "recuperando": False,
+        "trades_fuera_banda": 0,
+        "forzar_resub_libro": False,
     }
 
 
@@ -295,7 +299,6 @@ def _toca_libro_crudo(estado, libro_crudo_cada):
 
 
 UMBRAL_HUECO_SEG = 15.0
-TOPE_HUECO_SEG = 600.0
 TOPE_LLAMADAS_RECUPERACION = 10
 TOPE_TRADES_RECUPERACION = 5000
 
@@ -325,64 +328,73 @@ def _registrar_hueco(coin, ts_previo, duracion_seg, estado_txt, n_trades, vol):
         })
 
 
-async def _recuperar_hueco(coin, simbolo, estado):
-    """_recuperar_hueco(coin, simbolo, estado) -> None"""
+async def _recuperar_hueco(coin, simbolo, estado, rest_lock):
+    """_recuperar_hueco(coin, simbolo, estado, rest_lock) -> None.
+    Sin tope por duracion: un corte largo (red o corriente) igual se intenta, acotado solo
+    por TOPE_LLAMADAS_RECUPERACION/TOPE_TRADES_RECUPERACION (que ya limitan el coste)."""
+    if estado["recuperando"]:
+        return
     ts_previo = estado.get("ultimo_trade_ts")
     if ts_previo is None:
         return
-
-    duracion = (int(time.time() * 1000) - ts_previo) / 1000.0
-    if duracion > TOPE_HUECO_SEG:
-        _registrar_hueco(coin, ts_previo, duracion, "no_intentado_hueco_grande", 0, 0.0)
-        print(f"  (hueco) {coin}: {duracion:.0f}s, supera el tope de {TOPE_HUECO_SEG:.0f}s, no se intenta recuperar")
-        return
-
-    loop = asyncio.get_running_loop()
-    n_nuevos, vol_nuevo, llamadas, cursor = 0, 0.0, 0, ts_previo
+    estado["recuperando"] = True
     try:
-        while llamadas < TOPE_LLAMADAS_RECUPERACION:
-            llamadas += 1
-            lote = await loop.run_in_executor(None, lambda c=cursor: datos.trades(simbolo, desde=c, limite=500))
-            if not lote:
-                break
-            for t in sorted(lote, key=lambda x: x.get("timestamp") or 0):
-                tt = t.get("timestamp")
-                if tt is None or tt < ts_previo:
-                    continue
-                if _procesar_trade(estado, t):
-                    n_nuevos += 1
-                    vol_nuevo += t.get("amount") or 0.0
-            marcas = [t.get("timestamp") for t in lote if t.get("timestamp") is not None]
-            if not marcas:
-                break
-            nuevo_cursor = max(marcas)
-            fin = nuevo_cursor <= cursor or len(lote) < 500 or n_nuevos >= TOPE_TRADES_RECUPERACION
-            cursor = nuevo_cursor
-            if fin:
-                break
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        print(f"  (aviso) recuperacion de hueco {coin}: {e}")
-        _registrar_hueco(coin, ts_previo, duracion, "error", n_nuevos, vol_nuevo)
-        return
+        duracion = (int(time.time() * 1000) - ts_previo) / 1000.0
+        loop = asyncio.get_running_loop()
+        n_nuevos, vol_nuevo, llamadas, cursor = 0, 0.0, 0, ts_previo
+        try:
+            while llamadas < TOPE_LLAMADAS_RECUPERACION:
+                llamadas += 1
+                async with rest_lock:
+                    lote = await loop.run_in_executor(None, lambda c=cursor: datos.trades(simbolo, desde=c, limite=500))
+                if not lote:
+                    break
+                for t in sorted(lote, key=lambda x: x.get("timestamp") or 0):
+                    tt = t.get("timestamp")
+                    if tt is None or tt < ts_previo:
+                        continue
+                    if _procesar_trade(estado, t):
+                        n_nuevos += 1
+                        vol_nuevo += t.get("amount") or 0.0
+                marcas = [t.get("timestamp") for t in lote if t.get("timestamp") is not None]
+                if not marcas:
+                    break
+                nuevo_cursor = max(marcas)
+                fin = nuevo_cursor <= cursor or len(lote) < 500 or n_nuevos >= TOPE_TRADES_RECUPERACION
+                cursor = nuevo_cursor
+                if fin:
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"  (aviso) recuperacion de hueco {coin}: {e}")
+            _registrar_hueco(coin, ts_previo, duracion, "error", n_nuevos, vol_nuevo)
+            return
 
-    parcial = llamadas >= TOPE_LLAMADAS_RECUPERACION or n_nuevos >= TOPE_TRADES_RECUPERACION
-    estado_txt = "parcial" if parcial else ("completo" if n_nuevos else "sin_datos_nuevos")
-    _registrar_hueco(coin, ts_previo, duracion, estado_txt, n_nuevos, vol_nuevo)
-    print(f"  (hueco) {coin}: {duracion:.1f}s, {estado_txt}, {n_nuevos} trades recuperados")
+        parcial = llamadas >= TOPE_LLAMADAS_RECUPERACION or n_nuevos >= TOPE_TRADES_RECUPERACION
+        estado_txt = "parcial" if parcial else ("completo" if n_nuevos else "sin_datos_nuevos")
+        _registrar_hueco(coin, ts_previo, duracion, estado_txt, n_nuevos, vol_nuevo)
+        print(f"  (hueco) {coin}: {duracion:.1f}s, {estado_txt}, {n_nuevos} trades recuperados")
+    finally:
+        estado["recuperando"] = False
 
 
-async def _recuperar_al_arrancar(coin, simbolo, estado):
-    """_recuperar_al_arrancar(coin, simbolo, estado) -> None"""
+async def _recuperar_al_arrancar(coin, simbolo, estado, rest_lock):
+    """_recuperar_al_arrancar(coin, simbolo, estado, rest_lock) -> None"""
     if estado["ultimo_trade_ts"] is None:
         return
-    await _recuperar_hueco(coin, simbolo, estado)
+    await _recuperar_hueco(coin, simbolo, estado, rest_lock)
 
 
-async def _watch_book(exchange, coin, simbolo, estado):
+async def _watch_book(exchange, coin, simbolo, estado, rest_lock):
     while True:
         try:
+            if estado["forzar_resub_libro"]:
+                estado["forzar_resub_libro"] = False
+                print(f"  (aviso) libro {coin}: varios trades seguidos fuera de banda bid/ask, "
+                      f"forzando resuscripcion (posible lado del libro atascado)...")
+                await exchange.un_watch_order_book(simbolo)
+                continue
             ob = await exchange.watch_order_book(simbolo)
             bids, asks = ob["bids"], ob["asks"]
             if bids and asks and bids[0][0] > asks[0][0]:
@@ -392,7 +404,7 @@ async def _watch_book(exchange, coin, simbolo, estado):
                 continue
             ahora = time.monotonic()
             if estado["libro_ts"] is not None and (ahora - estado["libro_ts"]) > UMBRAL_HUECO_SEG:
-                await _recuperar_hueco(coin, simbolo, estado)
+                await _recuperar_hueco(coin, simbolo, estado, rest_lock)
             estado["libro"] = ob
             estado["libro_ts"] = ahora
         except asyncio.CancelledError:
@@ -402,18 +414,59 @@ async def _watch_book(exchange, coin, simbolo, estado):
             await asyncio.sleep(2)
 
 
+TOLERANCIA_TRADE_FUERA_BANDA = 0.003
+TRADES_FUERA_BANDA_PARA_FORZAR = 5
+
+
+def _revisar_trade_vs_libro(estado, t):
+    """_revisar_trade_vs_libro(estado, t) -> None.
+    Defensa extra sobre el checksum de ccxt: si varios trades en vivo seguidos imprimen
+    fuera de la banda [bid,ask] (con margen), es señal de que un lado del libro se quedo
+    atascado sin que el checksum lo haya pillado (solo cubre los 25 niveles superiores).
+    Marca el libro para resuscripcion en vez de tocarlo aqui - eso es cosa de _watch_book."""
+    libro = estado["libro"]
+    precio = t.get("price")
+    if not libro or precio is None:
+        return
+    bids, asks = libro.get("bids"), libro.get("asks")
+    if not bids or not asks:
+        return
+    bid, ask = bids[0][0], asks[0][0]
+    banda = max(bid, ask) * TOLERANCIA_TRADE_FUERA_BANDA
+    if (bid - banda) <= precio <= (ask + banda):
+        estado["trades_fuera_banda"] = 0
+        return
+    estado["trades_fuera_banda"] += 1
+    if estado["trades_fuera_banda"] >= TRADES_FUERA_BANDA_PARA_FORZAR:
+        estado["forzar_resub_libro"] = True
+        estado["trades_fuera_banda"] = 0
+
+
 async def _watch_trades(exchange, coin, simbolo, estado):
     while True:
         try:
             trades = await exchange.watch_trades(simbolo)
+            estado["trades_ts"] = time.monotonic()
             for t in trades:
                 _procesar_trade(estado, t)
+                _revisar_trade_vs_libro(estado, t)
             _podar_ids_recientes(estado)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             print(f"  (aviso) trades {coin}: {e}")
             await asyncio.sleep(2)
+
+
+async def _vigilar_trades(coin, simbolo, estado, rest_lock):
+    """_vigilar_trades(coin, simbolo, estado, rest_lock) -> None.
+    Complementa a _watch_book: sin esto, un corte que tumbe solo el canal de trades
+    (libro sigue fresco) no dispara ninguna recuperacion hasta el siguiente reinicio."""
+    while True:
+        await asyncio.sleep(UMBRAL_HUECO_SEG)
+        ahora = time.monotonic()
+        if estado["trades_ts"] is not None and (ahora - estado["trades_ts"]) > UMBRAL_HUECO_SEG:
+            await _recuperar_hueco(coin, simbolo, estado, rest_lock)
 
 
 async def _watch_ticker(exchange, coin, simbolo, estado):
@@ -431,12 +484,13 @@ async def _watch_ticker(exchange, coin, simbolo, estado):
             await asyncio.sleep(2)
 
 
-async def _actualizar_ls_ratio(coin, simbolo, estado, params):
-    """_actualizar_ls_ratio(coin, simbolo, estado, params) -> None"""
+async def _actualizar_ls_ratio(coin, simbolo, estado, params, rest_lock):
+    """_actualizar_ls_ratio(coin, simbolo, estado, params, rest_lock) -> None"""
     loop = asyncio.get_running_loop()
     while True:
         try:
-            valor = await loop.run_in_executor(None, datos.long_short_ratio, simbolo)
+            async with rest_lock:
+                valor = await loop.run_in_executor(None, datos.long_short_ratio, simbolo)
             if valor is not None:
                 estado["ls_ratio"] = valor
         except asyncio.CancelledError:
@@ -450,8 +504,8 @@ async def _actualizar_ls_ratio(coin, simbolo, estado, params):
         await asyncio.sleep(params["ls_ratio_cada"])
 
 
-def _iniciar_coin(exchange, coin, simbolo, params, estados, tareas, arch, writer):
-    """_iniciar_coin(exchange, coin, simbolo, params, estados, tareas, arch, writer) -> bool"""
+def _iniciar_coin(exchange, coin, simbolo, params, estados, tareas, arch, writer, rest_lock):
+    """_iniciar_coin(exchange, coin, simbolo, params, estados, tareas, arch, writer, rest_lock) -> bool"""
     if not _lock_libre_o_huerfano(coin):
         print(f"(aviso) {coin}: ya hay un grabador_libro.py corriendo para esta moneda, no se anade.")
         return False
@@ -465,7 +519,7 @@ def _iniciar_coin(exchange, coin, simbolo, params, estados, tareas, arch, writer
         writer[coin].writeheader()
         arch[coin].flush()
 
-    cvd_previo = _ultimo_cvd(_archivo(coin))
+    cvd_previo = _ultimo_cvd(ruta)
     estados[coin] = _crear_estado(cvd_previo)
     if cvd_previo is not None:
         print(f"  {coin}: CVD retomado en {cvd_previo:+.4f} (fichero existente)")
@@ -480,11 +534,12 @@ def _iniciar_coin(exchange, coin, simbolo, params, estados, tareas, arch, writer
         estado["ids_recientes"] = {tid: time.monotonic() for tid in ids_cursor}
 
     tareas[coin] = [
-        asyncio.create_task(_recuperar_al_arrancar(coin, simbolo, estado), name=f"recuperacion_arranque_{coin}"),
-        asyncio.create_task(_watch_book(exchange, coin, simbolo, estado), name=f"libro_{coin}"),
+        asyncio.create_task(_recuperar_al_arrancar(coin, simbolo, estado, rest_lock), name=f"recuperacion_arranque_{coin}"),
+        asyncio.create_task(_watch_book(exchange, coin, simbolo, estado, rest_lock), name=f"libro_{coin}"),
         asyncio.create_task(_watch_trades(exchange, coin, simbolo, estado), name=f"trades_{coin}"),
+        asyncio.create_task(_vigilar_trades(coin, simbolo, estado, rest_lock), name=f"vigilar_trades_{coin}"),
         asyncio.create_task(_watch_ticker(exchange, coin, simbolo, estado), name=f"ticker_{coin}"),
-        asyncio.create_task(_actualizar_ls_ratio(coin, simbolo, estado, params), name=f"lsratio_{coin}"),
+        asyncio.create_task(_actualizar_ls_ratio(coin, simbolo, estado, params, rest_lock), name=f"lsratio_{coin}"),
     ]
     print(f"  {coin} -> {ruta}")
     return True
@@ -506,13 +561,13 @@ async def _detener_coin(coin, estados, tareas, arch, writer):
     print(f"  {coin}: parado y lock liberado.")
 
 
-async def _reiniciar_coin(exchange, coin, simbolo, params, estados, tareas, arch, writer):
+async def _reiniciar_coin(exchange, coin, simbolo, params, estados, tareas, arch, writer, rest_lock):
     await _detener_coin(coin, estados, tareas, arch, writer)
-    _iniciar_coin(exchange, coin, simbolo, params, estados, tareas, arch, writer)
+    _iniciar_coin(exchange, coin, simbolo, params, estados, tareas, arch, writer, rest_lock)
     print(f"(comando) {coin}: reiniciada en caliente.")
 
 
-def _procesar_comandos(exchange, coins_activas, params, simbolos, estados, tareas, arch, writer):
+def _procesar_comandos(exchange, coins_activas, params, simbolos, estados, tareas, arch, writer, rest_lock, tareas_fondo):
     """_procesar_comandos(...) -> None. Lee JSON pendientes en DIR_COMANDOS."""
     if not os.path.isdir(DIR_COMANDOS):
         return
@@ -534,7 +589,7 @@ def _procesar_comandos(exchange, coins_activas, params, simbolos, estados, tarea
             else:
                 simbolo = datos.normalizar_simbolo(coin_cmd, "f")[0]
                 simbolos[coin_cmd] = simbolo
-                if _iniciar_coin(exchange, coin_cmd, simbolo, params, estados, tareas, arch, writer):
+                if _iniciar_coin(exchange, coin_cmd, simbolo, params, estados, tareas, arch, writer, rest_lock):
                     coins_activas.add(coin_cmd)
                     print(f"(comando) {coin_cmd}: anadida en caliente.")
             os.remove(ruta_cmd)
@@ -545,7 +600,9 @@ def _procesar_comandos(exchange, coins_activas, params, simbolos, estados, tarea
                 print(f"(aviso) comando ignorado: {coin_cmd} no esta activa.")
             else:
                 coins_activas.discard(coin_cmd)
-                asyncio.create_task(_detener_coin(coin_cmd, estados, tareas, arch, writer))
+                t = asyncio.create_task(_detener_coin(coin_cmd, estados, tareas, arch, writer))
+                tareas_fondo.add(t)
+                t.add_done_callback(tareas_fondo.discard)
                 print(f"(comando) {coin_cmd}: quitada en caliente.")
             os.remove(ruta_cmd)
             continue
@@ -554,8 +611,10 @@ def _procesar_comandos(exchange, coins_activas, params, simbolos, estados, tarea
             if coin_cmd not in coins_activas:
                 print(f"(aviso) comando ignorado: {coin_cmd} no esta activa, usa anadir_coin.")
             else:
-                asyncio.create_task(_reiniciar_coin(
-                    exchange, coin_cmd, simbolos.get(coin_cmd), params, estados, tareas, arch, writer))
+                t = asyncio.create_task(_reiniciar_coin(
+                    exchange, coin_cmd, simbolos.get(coin_cmd), params, estados, tareas, arch, writer, rest_lock))
+                tareas_fondo.add(t)
+                t.add_done_callback(tareas_fondo.discard)
             os.remove(ruta_cmd)
             continue
 
@@ -689,9 +748,11 @@ async def main_async():
     simbolos = {c: datos.normalizar_simbolo(c, "f")[0] for c in coins}
     estados, tareas, arch, writer = {}, {}, {}, {}
     coins_activas = set()
+    rest_lock = asyncio.Lock()
+    tareas_fondo = set()
 
     for coin in coins:
-        if _iniciar_coin(exchange, coin, simbolos[coin], params, estados, tareas, arch, writer):
+        if _iniciar_coin(exchange, coin, simbolos[coin], params, estados, tareas, arch, writer, rest_lock):
             coins_activas.add(coin)
 
     if not coins_activas:
@@ -705,26 +766,34 @@ async def main_async():
           f"(hasta {params['profundidad']} niveles guardados).")
     print(f"L/S ratio cada {params['ls_ratio_cada']:.0f}s. Libro crudo (bids_json/asks_json) "
           f"cada {params['libro_crudo_cada']:.0f}s.")
-    print(f"Ajuste en caliente / anadir-quitar-reiniciar moneda via telegram_control.py: {DIR_COMANDOS}")
+    print(f"Ajuste en caliente / anadir-quitar-reiniciar moneda: dejar caer un JSON en {DIR_COMANDOS}")
     print("Ctrl+C para parar.")
 
     try:
         while True:
-            _procesar_comandos(exchange, coins_activas, params, simbolos, estados, tareas, arch, writer)
+            _procesar_comandos(exchange, coins_activas, params, simbolos, estados, tareas, arch, writer,
+                                rest_lock, tareas_fondo)
             for coin in list(coins_activas):
                 estado = estados.get(coin)
                 if estado is None or coin not in writer:
                     continue
-                fila = _fila(coin, estado, params)
-                writer[coin].writerow(fila)
-                arch[coin].flush()
-                _guardar_cursor(coin, estado)
+                try:
+                    fila = _fila(coin, estado, params)
+                    writer[coin].writerow(fila)
+                    arch[coin].flush()
+                    _guardar_cursor(coin, estado)
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    raise
+                except Exception as e:
+                    print(f"  (aviso) fila {coin}: {e} - se salta esta vuelta, sigue el resto.")
             await asyncio.sleep(params["cada"])
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\nParado por el usuario.")
     finally:
         for coin in list(coins_activas):
             await _detener_coin(coin, estados, tareas, arch, writer)
+        if tareas_fondo:
+            await asyncio.gather(*tareas_fondo, return_exceptions=True)
         await exchange.close()
         await _session_ws.close()
 
