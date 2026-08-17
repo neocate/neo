@@ -1,16 +1,6 @@
-# ---------------------------------------------------------------
-# verificar_indicadores.py - Verificacion independiente de
-# mercado/indicadores.py.rsi()/atr() contra una implementacion de
-# referencia escrita a mano (formula de libro de texto, sin optimizar,
-# sin reusar nada de indicadores.py) sobre datos reales.
-#
-# No es un test de "cambio esperado" - es una comprobacion de que la
-# matematica en si (Wilder RSI/ATR) da lo que dice dar, independientemente
-# de si el codigo de indicadores.py cambia con el tiempo.
-#
 # Uso:
 #   python herramientas/verificacion/verificar_indicadores.py [coin] [tf]
-# ---------------------------------------------------------------
+
 import csv
 import os
 import sys

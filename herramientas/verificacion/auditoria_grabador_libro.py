@@ -1,23 +1,5 @@
-# ---------------------------------------------------------------
-# auditoria_grabador_libro.py - Auditoria de calidad de dato de
-# herramientas/grabador_libro/flujo_<COIN>.csv - NO se fia de ninguna
-# columna calculada, la recalcula desde sus propios insumos y compara:
-#
-#   delta_vol = vol_buy - vol_sell
-#   cvd[i] = cvd[i-1] + delta_vol[i]  (salvo reinicio de pid)
-#   mid = (bid+ask)/2 ; spread_bps = (ask-bid)/mid*10000  (libro no cruzado)
-#   microprecio/imbalance recalculados desde bids_json/asks_json crudos
-#   bid/ask coinciden con el primer nivel de bids_json/asks_json
-#   bids_json/asks_json bien ordenados (bids desc, asks asc)
-#   volumenes negativos, n_trades=0 con volumen, OI negativo, funding
-#   absurdo, long/short ratio fuera de rango, huecos de cadencia >60s
-#
-# No reutiliza mercado/flujo.py para el recalculo (se reimplementa aqui a
-# mano) - el objetivo es una segunda opinion independiente, no probar que
-# flujo.py se llama a si mismo correctamente.
-#
 # Uso: python herramientas/verificacion/auditoria_grabador_libro.py [coin ...]
-# ---------------------------------------------------------------
+
 import csv
 import json
 import os

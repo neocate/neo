@@ -1,66 +1,7 @@
-# ---------------------------------------------------------------
-# niveles.py - Detecta suelos/techos (soporte/resistencia) de UN TF
-# a partir del historico ya descargado, para poder compararlos a ojo contra
-# un grafico real (TradingView, Binance...) antes de fiarse de ellos.
-#
-# Deliberadamente SIN valores por defecto en k/tolerancia/toques-min - la
-# idea es que el usuario los pase explicito cada vez y compare resultados,
-# en vez de heredar sin darse cuenta los que ya se habian validado en el
-# proyecto viejo (bit/escalera.py: tolerancia 0.25xATR, 6 toques). Los datos
-# tienen que encontrar el optimo sin ese sesgo de partida.
-#
-# Criterio (mismo que bit/escalera.py._proximo_nivel, pero aqui se listan
-# TODOS los niveles confirmados del rango pedido, no solo el siguiente por
-# delante del precio):
-#   1. Candidatos: extremos_locales() (swing highs/lows, k velas a cada lado)
-#   2. Tolerancia en ATR (no en % fijo - un % fijo degenera en un filtro que
-#      dice siempre que si o siempre que no, ver anotaciones de bit). Se usa
-#      la MEDIANA del ATR del rango analizado como referencia unica, no un
-#      ATR que cambia punto a punto - para que todos los niveles se midan
-#      con la misma vara.
-#   3. Toques minimos: un extremo tocado una sola vez no es soporte real.
-#      Se agrupan velas consecutivas dentro de la tolerancia como UN solo
-#      toque (si no, una visita larga infla el conteo).
-#   4. Niveles que caen dentro de la tolerancia entre si se fusionan en uno,
-#      sin importar tipo (techo/suelo) - una zona de rango actua como
-#      resistencia y soporte alternada, y extremos_locales suele devolver
-#      varios swing points casi pegados en la misma zona. Se agrupan en
-#      clusters completos (ancla = precio del primer nivel del cluster, no
-#      el ultimo agregado) para que una cadena de niveles muy pegados entre
-#      si no derive mas alla de la tolerancia real.
-#   5. Estado (vivo/roto/flip) despues del ultimo toque: un nivel se marca
-#      "roto" cuando hay --confirmacion-velas cierres CONSECUTIVOS del otro
-#      lado del nivel +/- tolerancia (un solo cierre puede ser ruido). Si
-#      despues de romperse el precio vuelve a testear la zona desde el otro
-#      lado, se marca "flip" (cambio de rol: techo roto actuando de suelo,
-#      o viceversa). Valor sugerido por ahora: 2 velas de confirmacion -
-#      no calibrado contra datos como k/tolerancia/toques-min, ajustar si
-#      se ve mucho falso positivo/negativo.
-#
-# --tf-macro <tf>: ademas del TF principal (mas fino, para entradas/salidas),
-# analiza un TF mas alto con los MISMOS k/tolerancia-atr/toques-min y usa su
-# techo y suelo vigentes mas cercanos al precio como TOPES del rango. Los
-# niveles del TF principal que caen fuera de ese rango macro se dejan
-# afuera del listado "ajustado" (el listado completo de mas arriba no se
-# toca, es solo una vista adicional).
-#
 # Uso:
 #   python herramientas/niveles.py <coin> <tf> --k 3 --tolerancia-atr 0.25 --toques-min 3 [--desde-dias 90] [--tf-macro 4h]
 #   python herramientas/niveles.py --actualizar <coin> <tf> --k .. --tolerancia-atr .. --toques-min ..
 #                                   [--confirmacion-velas 2] [--cada segundos]
-#
-# --actualizar (2026-08-14): mantiene un LISTADO persistente de niveles en
-# herramientas/niveles/<COIN>/ (listado_<TF>.json + historial_<TF>.csv que
-# solo crece, un evento por fila: nivel_inicial/nivel_nuevo/toque/rotura/
-# flip). Mismo espiritu que descargar_bit.py --velas: sin listado previo
-# (o si cambian k/tolerancia-atr/toques-min/confirmacion-velas respecto al
-# guardado) hace un barrido completo desde cero; si ya existe con los
-# MISMOS parametros, solo actualiza los ESTADOS de los niveles ya
-# conocidos con las velas nuevas desde la ultima vez - no vuelve a
-# recalcular todo el historico en cada ejecucion. Sin --cada: una sola
-# pasada. Con --cada (mismo patron que --velas --cada): modo daemon, llama
-# a --actualizar en bucle - barato casi siempre, el barrido caro solo pasa
-# la primera vez o si cambian los parametros.
 #
 # Ejemplos:
 #   python herramientas/niveles.py btc 4h --k 2 --tolerancia-atr 0.25 --toques-min 3
@@ -68,7 +9,6 @@
 #   python herramientas/niveles.py eth 1h --k 3 --tolerancia-atr 0.25 --toques-min 4 --desde-dias 90 --tf-macro 4h
 #   python herramientas/niveles.py --actualizar eth 4h --k 3 --tolerancia-atr 0.25 --toques-min 4
 #   python herramientas/niveles.py --actualizar btc 4h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60
-# ---------------------------------------------------------------
 
 import csv
 import json
@@ -88,15 +28,6 @@ CAMPOS_HISTORIAL = [
     "toques", "estado", "primero", "ultimo", "pid",
 ]
 
-# Parametros en caliente para --actualizar (2026-08-17, mismo patron que
-# mercado/indicadores.py / mercado/senales.py) - SOLO para --actualizar
-# (los daemons de produccion, pensado para telegram_control.py mas
-# adelante). El modo de un tiro (comparacion manual, mas abajo en main())
-# sigue exigiendo --k/--tolerancia-atr/--toques-min explicitos como
-# siempre - ver la cabecera del fichero: ahi la idea de "sin defaults a
-# proposito" para forzar una eleccion consciente sigue siendo valida, esto
-# no la toca. Los valores de PARAMS_DEFECTO son los que ya estan validados
-# y corriendo en produccion (ver ESTADO.md).
 PARAMS_DEFECTO = {
     "k": 3, "tolerancia_atr": 0.25, "toques_min": 4, "confirmacion_velas": 2,
 }
@@ -113,26 +44,13 @@ def _ruta_config():
 
 _cache_params = None
 _cache_mtime = None
-_cache_verificado = 0.0  # time.monotonic() de la ultima comprobacion de mtime
+_cache_verificado = 0.0
 
-# Minimo de segundos entre comprobaciones de mtime en disco (2026-08-17,
-# mismo motivo que mercado/indicadores.py / mercado/senales.py: el proyecto
-# vive en un share de red, y un os.path.exists()/getmtime() de mas es un
-# viaje de red de mas). Aqui _actualizar() solo llama a cargar_params() una
-# vez por vuelta del bucle --cada (60s), asi que el impacto es minimo, pero
-# se deja el mismo patron por consistencia y por si algun caller futuro lo
-# llama desde un bucle mas ajustado.
 INTERVALO_RECOMPROBAR = 2.0
 
 
 def cargar_params():
-    """PARAMS_DEFECTO + lo que haya en herramientas/niveles/niveles_config.json
-    (si existe) - cacheado por mtime (y el propio mtime solo se comprueba
-    como mucho cada INTERVALO_RECOMPROBAR segundos, ver su comentario) para
-    no releerlo/parsearlo en cada llamada. _actualizar() lo consulta en cada
-    vuelta del bucle --cada - asi que editar el JSON mientras un daemon esta
-    corriendo se recoge solo, sin reiniciar el proceso (maximo --cada
-    segundos de retraso, mas el margen de INTERVALO_RECOMPROBAR)."""
+    """cargar_params() -> dict, PARAMS_DEFECTO + niveles_config.json (si existe)"""
     global _cache_params, _cache_mtime, _cache_verificado
     ahora = time.monotonic()
     if _cache_params is not None and (ahora - _cache_verificado) < INTERVALO_RECOMPROBAR:
@@ -157,12 +75,7 @@ def cargar_params():
 
 
 def guardar_params(params):
-    """Escribe 'params' (solo claves conocidas de PARAMS_DEFECTO, dentro de
-    LIMITES_PARAMS) en niveles_config.json - pensado para
-    telegram_control.py mas adelante (de momento nada lo llama todavia).
-    Escritura atomica (tmp + os.replace), mismo patron que el resto del
-    proyecto (grabador_config.json / indicadores_config.json /
-    senales_config.json)."""
+    """guardar_params(params: dict) -> None. Escribe en niveles_config.json, valida contra LIMITES_PARAMS."""
     a_guardar = dict(cargar_params())
     for k, v in params.items():
         if k not in PARAMS_DEFECTO:
@@ -178,16 +91,9 @@ def guardar_params(params):
         json.dump(a_guardar, f)
     os.replace(tmp, ruta)
 
-# Bitget, NO Binance (2026-08-07, correccion de Fran): los niveles se
-# vigilan en vivo contra el precio de Bitget (mercado/datos.py, el mismo
-# exchange que opera monitor.py) - calcularlos sobre velas de otro exchange
-# (Binance, via descargar_bin.py) podia marcar "toque" o "roto" con precios
-# que Bitget nunca vio, o al reves. Ver tambien herramientas/descargar_bit.py
-# cabecera: "para contrastar una sesion real usar este script, no
-# descargar_bin.py".
-
 
 def _cargar_velas(coin, tf, desde_dias=None):
+    """_cargar_velas(coin, tf, desde_dias=None) -> (velas: list, ruta: str)"""
     ruta = _archivo_bitget(coin, tf)
     if not os.path.exists(ruta):
         raise FileNotFoundError(
@@ -201,7 +107,7 @@ def _cargar_velas(coin, tf, desde_dias=None):
     velas = []
     with open(ruta, newline='') as f:
         r = csv.reader(f)
-        next(r)  # cabecera
+        next(r)
         for row in r:
             ts = int(row[0])
             if corte_ms is not None and ts < corte_ms:
@@ -211,9 +117,7 @@ def _cargar_velas(coin, tf, desde_dias=None):
 
 
 def _carpeta_niveles(coin):
-    """herramientas/niveles/<COIN>/ - carpeta propia de --actualizar (mismo
-    patron que herramientas/grabador_libro/ y herramientas/velas/: cada
-    script que escribe estado persistente tiene su propia carpeta)."""
+    """_carpeta_niveles(coin: str) -> str"""
     carpeta = os.path.join(DIR_NIVELES, coin.upper())
     os.makedirs(carpeta, exist_ok=True)
     return carpeta
@@ -236,8 +140,7 @@ def _mediana(xs):
 
 
 def _contar_toques(velas, nivel, tolerancia):
-    """Cuenta toques agrupando velas consecutivas dentro de la tolerancia
-    como UN solo toque. Devuelve (toques, ts_primero, ts_ultimo)."""
+    """_contar_toques(velas, nivel: float, tolerancia: float) -> (toques: int, ts_primero, ts_ultimo)"""
     toques = 0
     dentro = False
     primero = ultimo = None
@@ -257,11 +160,7 @@ def _contar_toques(velas, nivel, tolerancia):
 
 
 def _fusionar(niveles, tolerancia):
-    """Niveles que caen dentro de 'tolerancia' de un cluster se fusionan en
-    uno (se queda el de mas toques), sin importar tipo techo/suelo. Cada
-    candidato se compara contra el precio del PRIMER nivel del cluster
-    actual (no el ultimo agregado), para no ir derivando en cadena mas alla
-    de la tolerancia real. 'niveles' ya viene ordenado por precio."""
+    """_fusionar(niveles: list[dict], tolerancia: float) -> list[dict]"""
     if not niveles:
         return []
 
@@ -285,13 +184,7 @@ def _fusionar(niveles, tolerancia):
 
 
 def _evaluar_estado(velas, nivel, tipo, tolerancia, ultimo_ts, confirmacion_velas=2):
-    """Estado del nivel despues de su ultimo toque. Devuelve
-    (estado, ts_rotura, ts_flip):
-      - "vivo": nunca hubo confirmacion_velas cierres consecutivos del otro
-        lado de nivel +/- tolerancia.
-      - "roto": se rompio y no hubo retest despues.
-      - "flip": se rompio y despues el precio volvio a testear la zona
-        desde el otro lado (cambio de rol)."""
+    """_evaluar_estado(velas, nivel, tipo, tolerancia, ultimo_ts, confirmacion_velas=2) -> (estado, ts_rotura, ts_flip)"""
     posteriores = [v for v in velas if v[0] > ultimo_ts]
 
     consecutivos = 0
@@ -318,6 +211,7 @@ def _evaluar_estado(velas, nivel, tipo, tolerancia, ultimo_ts, confirmacion_vela
 
 
 def detectar_niveles(velas, k, tolerancia_atr, toques_min, periodo_atr=14):
+    """detectar_niveles(velas, k, tolerancia_atr, toques_min, periodo_atr=14) -> (niveles: list[dict], atr_ref: float, tolerancia: float)"""
     altos = [v[2] for v in velas]
     bajos = [v[3] for v in velas]
     cierres = [v[4] for v in velas]
@@ -349,9 +243,7 @@ def detectar_niveles(velas, k, tolerancia_atr, toques_min, periodo_atr=14):
 
 
 def _rol_efectivo(niv):
-    """Rol actual del nivel: si hizo flip, invierte el tipo original (un
-    techo roto que fue retesteado desde arriba ahora actua de suelo, y
-    viceversa). Niveles 'roto' sin retest no tienen rol vigente."""
+    """_rol_efectivo(niv: dict) -> 'techo'|'suelo'"""
     if niv["estado"] == "flip":
         return "suelo" if niv["tipo"] == "techo" else "techo"
     return niv["tipo"]
@@ -362,10 +254,7 @@ def _fmt_fecha(ts_ms):
 
 
 def _abrir_historial(coin, tf):
-    """Abre (o crea) historial_<TF>.csv en modo append - mismo patron que
-    marcador_tpsl.py/validador_niveles.py: CAMPOS_* como cabecera, header
-    solo si el fichero es nuevo, flush por fila (el llamador cierra en su
-    propio finally). Solo crece, nunca se reescribe."""
+    """_abrir_historial(coin, tf) -> (writer, log)"""
     ruta = _ruta_historial(coin, tf)
     nuevo = not os.path.exists(ruta)
     log = open(ruta, "a", newline="")
@@ -395,19 +284,13 @@ def _anotar_historial(writer, log, coin, tf, evento, niv):
 
 
 def _nivel_a_dict(niv):
-    """Nivel -> dict serializable para listado_<TF>.json. Solo campos
-    PERSISTENTES/atemporales (precio, toques, estado, seguimiento
-    incremental) - dist_pct/antig_dias de _analizar() se calculan contra
-    el 'ahora' de esa llamada y quedarian obsoletos guardados."""
     return dict(tipo=niv["tipo"], precio=niv["precio"], toques=niv["toques"],
                 primero=niv["primero"], ultimo=niv["ultimo"], estado=niv["estado"],
                 dentro=niv.get("dentro", False), consecutivos=niv.get("consecutivos", 0))
 
 
 def _guardar_listado(coin, tf, params, atr_ref, tolerancia, ultimo_ts_procesado, niveles):
-    """Escritura atomica (tmp + os.replace), mismo patron que
-    cursor_<COIN>.json de grabador_libro.py - un lector nunca ve el
-    fichero a medio escribir."""
+    """_guardar_listado(coin, tf, params, atr_ref, tolerancia, ultimo_ts_procesado, niveles) -> None"""
     ruta = _ruta_listado(coin, tf)
     datos = dict(params=params, atr_ref=atr_ref, tolerancia=tolerancia,
                  ultimo_ts_procesado=ultimo_ts_procesado,
@@ -427,6 +310,7 @@ def _cargar_listado(coin, tf):
 
 
 def _analizar(coin, tf, k, tolerancia_atr, toques_min, desde_dias, confirmacion_velas):
+    """_analizar(coin, tf, k, tolerancia_atr, toques_min, desde_dias, confirmacion_velas) -> dict"""
     velas, ruta = _cargar_velas(coin, tf, desde_dias)
     niveles, atr_ref, tolerancia = detectar_niveles(velas, k, tolerancia_atr, toques_min)
     precio_actual = velas[-1][4] if velas else None
@@ -449,12 +333,7 @@ def _analizar(coin, tf, k, tolerancia_atr, toques_min, desde_dias, confirmacion_
 
 
 def _crear_listado(coin, tf, k, tolerancia_atr, toques_min, confirmacion_velas):
-    """Barrido inicial de --actualizar: una sola pasada de detectar_niveles()
-    + _evaluar_estado() sobre TODO el historico permanente de
-    herramientas/velas/ (sin ventana deslizante - ya escanean todo de una
-    vez). Crea listado_<TF>.json + historial_<TF>.csv desde cero. Se llama
-    cuando no hay listado previo, o cuando los parametros pasados no
-    coinciden con los del listado guardado (ver _actualizar)."""
+    """_crear_listado(coin, tf, k, tolerancia_atr, toques_min, confirmacion_velas) -> None"""
     r = _analizar(coin, tf, k, tolerancia_atr, toques_min, desde_dias=None,
                   confirmacion_velas=confirmacion_velas)
     velas = r["velas"]
@@ -482,18 +361,7 @@ def _crear_listado(coin, tf, k, tolerancia_atr, toques_min, confirmacion_velas):
 
 
 def _anotar_diferencias(niveles_viejos, niveles_nuevos, tolerancia, writer, log, coin, tf):
-    """Compara el listado anterior con un analisis fresco (mismos datos
-    actuales, misma tolerancia ya usada para producir 'niveles_nuevos') y
-    anota en el historial SOLO los eventos genuinos desde la ultima vez:
-    'nivel_nuevo' para los que no tenian pareja en el listado anterior,
-    'toque' cuando el timestamp del ultimo toque avanzo, 'rotura'/'flip'
-    cuando cambia el estado. El conteo de toques en si se corrige en
-    silencio al guardar el listado nuevo (es una correccion de
-    contabilidad del recalculo, no un evento de mercado nuevo) - no se
-    reescribe como una racha de eventos 'toque' sinteticos solo porque el
-    recalculo haya reagrupado clusters de otra forma (ver anotaciones.md,
-    2026-08-17: asi era como divergia la version incremental antigua).
-    Devuelve (n_nuevos, n_toques, n_transiciones, n_desaparecidos)."""
+    """_anotar_diferencias(niveles_viejos, niveles_nuevos, tolerancia, writer, log, coin, tf) -> (n_nuevos, n_toques, n_transiciones, n_desaparecidos)"""
     usados = set()
     n_nuevos = n_toques = n_transiciones = 0
     for nuevo in niveles_nuevos:
@@ -522,47 +390,11 @@ def _anotar_diferencias(niveles_viejos, niveles_nuevos, tolerancia, writer, log,
     return n_nuevos, n_toques, n_transiciones, n_desaparecidos
 
 
-_verificado_esta_sesion = set()  # {(coin, tf)} - ver _actualizar()
+_verificado_esta_sesion = set()
 
 
 def _actualizar(coin, tf, k=None, tolerancia_atr=None, toques_min=None, confirmacion_velas=None):
-    """--actualizar: SIEMPRE recalcula el analisis completo (detectar_niveles
-    + evaluar_estado sobre TODO el historico actual, via _analizar() - la
-    misma funcion que usa el modo de un tiro) en vez de actualizar
-    incrementalmente.
-
-    Arreglo de dos bugs reales encontrados el 2026-08-17 auditando
-    listado_<TF>.json contra un recalculo fresco (ver anotaciones.md):
-      1. atr_ref/tolerancia se congelaban en el valor del primer barrido y
-         nunca se refrescaban aunque siguieran llegando velas nuevas.
-      2. La fusion de niveles incremental (_nuevo_candidato, anadia
-         candidatos en el orden en que se descubrian con el tiempo) no
-         convergia con la fusion por lotes (_fusionar, agrupa TODOS los
-         candidatos a la vez ordenados por precio) - divergian incluso
-         fijando la misma tolerancia.
-    Recalcular entero cada vez elimina los dos de raiz: lo persistido pasa
-    a ser siempre exactamente lo que saldria de analizar hoy desde cero,
-    por construccion. Para los TF en produccion (15m/1h/4h, unos pocos
-    miles de velas) esto sigue siendo barato (por debajo de 1s, medido en
-    vivo) - si se amplia a 1m/3m/5m (decenas de miles de velas, muchos mas
-    candidatos) medir de nuevo antes de asumir que sigue siendo gratis.
-
-    La PRIMERA llamada de cada (coin, tf) en esta ejecucion del proceso
-    fuerza el recalculo aunque no haya velas nuevas desde el listado
-    guardado (_verificado_esta_sesion) - bug real visto en vivo 2026-08-17:
-    al relanzar los 9 procesos para recoger este mismo fix, ninguno llego a
-    corregir nada porque justo no habia entrado ninguna vela nueva desde el
-    ultimo tick del proceso viejo, y el atajo de "ya esta al dia" (pensado
-    solo para no repetir trabajo DENTRO de una misma ejecucion) se disparaba
-    antes de reconciliar el listado viejo (posiblemente divergente, de una
-    version anterior del algoritmo) contra un recalculo fresco. Las
-    siguientes llamadas de ese mismo (coin, tf) SI respetan el atajo
-    normalmente.
-
-    k/tolerancia_atr/toques_min/confirmacion_velas: si se omiten (None),
-    se toman de niveles_config.json via cargar_params() - ver su
-    docstring. Si se pasan explicitos (linea de comandos), ganan sobre el
-    json, igual que siempre."""
+    """_actualizar(coin, tf, k=None, tolerancia_atr=None, toques_min=None, confirmacion_velas=None) -> None"""
     clave_sesion = (coin, tf)
     forzar_recalculo = clave_sesion not in _verificado_esta_sesion
     _verificado_esta_sesion.add(clave_sesion)
@@ -619,16 +451,7 @@ def _actualizar(coin, tf, k=None, tolerancia_atr=None, toques_min=None, confirma
 
 
 def _feed_niveles(coin, tf, k, tolerancia_atr, toques_min, confirmacion_velas, cada):
-    """Modo daemon para --actualizar (2026-08-14): llama a _actualizar() en
-    bucle cada 'cada' segundos - mismo patron que _feed_velas() en
-    descargar_bit.py. _actualizar() ya es barata cuando no hay velas nuevas
-    ('ya esta al dia', sin recalcular nada); cuando SI las hay, recalcula
-    el analisis completo cada vez (2026-08-17, ver docstring de
-    _actualizar) - barato para los TF en produccion (15m/1h/4h), medido en
-    vivo por debajo de 1s. Los parametros que se pasen como None se
-    resuelven contra niveles_config.json EN CADA VUELTA (cargar_params()
-    cacheado por mtime) - editar el JSON mientras este bucle esta
-    corriendo se recoge solo, sin reiniciar el proceso."""
+    """_feed_niveles(coin, tf, k, tolerancia_atr, toques_min, confirmacion_velas, cada) -> None, daemon"""
     print(f"Feed de niveles: {coin.upper()} {tf} (cada={cada:.0f}s). Ctrl+C para parar.")
     try:
         while True:
@@ -642,13 +465,7 @@ def _feed_niveles(coin, tf, k, tolerancia_atr, toques_min, confirmacion_velas, c
 
 
 def _avisos_zona_indecision(techos, suelos):
-    """Un techo/suelo NO roto sigue vigente sin importar de que lado quedo
-    el precio - pero si el mas cercano ya quedo del lado 'equivocado' (el
-    precio lo supero o lo perdio sin ruptura confirmada), no hay una banda
-    techo-arriba/suelo-abajo limpia alrededor del precio: es zona de
-    indecision, no de rango operable. Mejor esperar a que el precio
-    confirme direccion (rompa de verdad, o vuelva a respetar el nivel)
-    antes de tomar esa zona como valida para entradas/salidas."""
+    """_avisos_zona_indecision(techos, suelos) -> list[str]"""
     avisos = []
     if techos and techos[0]["dist_pct"] < 0:
         avisos.append(f"el techo vigente mas cercano ({techos[0]['precio']:.4f}) ya quedo "
@@ -680,10 +497,6 @@ def main():
             return
         coin, tf = args[0], args[1]
         resto = args[2:]
-        # None = tomar de niveles_config.json (ver cargar_params/_actualizar) -
-        # a diferencia del modo de un tiro de mas abajo, --actualizar SI puede
-        # omitirlos (pensado para telegram_control.py, ver cabecera del
-        # bloque PARAMS_DEFECTO mas arriba en el fichero).
         k = tolerancia_atr = toques_min = confirmacion_velas = None
         cada = None
         i = 0

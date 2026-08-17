@@ -1,100 +1,3 @@
-# ---------------------------------------------------------------
-# grabador_libro.py - Graba en CSV lo UNICO que no se puede reconstruir
-# despues a partir de velas: el libro de ordenes COMPLETO (resumen +
-# crudo nivel a nivel), el open interest, el funding rate, el trade flow
-# (CVD) y el long/short ratio agregado del mercado.
-#
-# REESCRITO 2026-08-13: de polling REST sincrono a WebSocket (Bitget v2,
-# via ccxt.pro) - motivado por dos bugs reales de CVD en la version REST
-# (cursor de timestamp perdiendo trades del mismo milisegundo, luego un
-# KeyError en el resume tras reinicio) que venian de la complejidad de
-# mantener un cursor de paginacion sobre fetch_trades. Con WS cada trade
-# llega empujado UNA vez, sin paginar - se elimina esa complejidad en el
-# caso normal (ver _procesar_trade). Ademas: libro/trades/funding/OI viven
-# ahora en una UNICA conexion consolidada que cubre TODAS las monedas del
-# proceso (antes: una llamada REST independiente por dato y por moneda,
-# cada `--cada` segundos).
-#
-# Decisiones tomadas tras una prueba en vivo (ver plan de la sesion, y
-# herramientas/_prueba_ws_bitget.py que la hizo):
-#   - canal `books50` da error 30016 "Param error" en USDT-FUTURES (solo
-#     existe para spot) - se usa el canal `books` incremental SIN limite,
-#     cuyo checksum CRC32 gestiona ccxt.pro por dentro (no hay que
-#     implementar nada a mano). Da MUCHOS mas niveles de los esperados
-#     (500 en BTC/ETH, 200 en ICP en la prueba) - se guardan TODOS por
-#     defecto (Fran, 2026-08-13: "guardemos todo ya que lo tenemos").
-#   - funding rate y open interest van por el canal `ticker` (antes REST,
-#     cacheado cada `--funding-cada` - ese parametro YA NO EXISTE, el
-#     ticker empuja solo, no hay nada que cachear/pedir).
-#   - long/short ratio SIGUE por REST (Bitget no lo transmite en directo,
-#     es un calculo periodico) - unico dato que sigue siendo poll, ahora
-#     via loop.run_in_executor para no bloquear el event loop.
-#   - UN SOLO PROCESO/conexion para todas las monedas (antes: un proceso
-#     por moneda con lock propio) - Bitget soporta nativamente suscribir
-#     varias monedas en un mismo mensaje y anadir/quitar en caliente sobre
-#     la misma conexion. El aislamiento que antes daba gratis el SO (un
-#     fallo de una moneda no tumbaba las demas) se reconstruye aqui a mano:
-#     cada moneda tiene sus propias tareas asyncio con su propio
-#     try/except (ver _watch_book/_watch_trades/_watch_ticker) - un fallo
-#     en una no toca las de otra.
-#   - Recuperacion acotada de huecos: al detectar (via el "latido" del
-#     libro, que en la prueba actualizaba decenas de veces por segundo)
-#     que ha pasado demasiado tiempo sin actualizacion, se asume un corte
-#     y se intenta rellenar los trades perdidos por REST (misma funcion
-#     mercado.datos.trades() ya probada) - acotado a 5 minutos y a un
-#     numero maximo de llamadas, para no fiarse a ciegas de un historico
-#     REST que ya sabemos que no es profundo en Bitget (ver
-#     mercado/datos.py.trades()). Se registra SIEMPRE en
-#     huecos_<COIN>.csv, se haya podido recuperar o no - para poder
-#     consultar en operaciones "¿ha habido algun hueco sin recuperar
-#     recientemente?" antes de fiarse de una señal (Fran, 2026-08-13).
-#
-# Cada script escribe ahora en su PROPIA carpeta dentro de herramientas/
-# (Fran, 2026-08-13) - este en herramientas/grabador_libro/, ya NO en el
-# herramientas/libro/ compartido con descargar_bit.py y los monitores. Los
-# consumidores externos (monitor_comun.py._localizar_csv_libro/
-# _requerir_grabador_libro, herramientas/verificar_flujo.py) se han
-# actualizado para buscar aqui.
-#
-# Velas (y por tanto RSI/EMA/ATR/todo lo que sale de ellas) SI tienen
-# historico en el exchange - un reinicio de monitor.py no las pierde, las
-# vuelve a pedir. El libro (liquidez en reposo) y el open interest NO tienen
-# historico en NINGUN exchange (ni Bitget ni Binance) - si no se graban EN
-# VIVO en el momento, se pierden para siempre (ver anotaciones.md
-# 2026-08-03: "lo que SI carece de historico y obliga a grabar en vivo es
-# solo el libro de ordenes").
-#
-# CVD (Cumulative Volume Delta): suma acumulada de (volumen comprador -
-# volumen vendedor) de trades YA EJECUTADOS, por el lado del AGRESOR (quien
-# cruzo el spread, no quien puso la orden pasiva) - distinto del libro, que
-# es liquidez EN REPOSO todavia sin ejecutar. Un CVD subiendo con precio
-# lateral/bajando (o viceversa) es la divergencia clasica que se usa como
-# señal de agotamiento.
-#
-# Al arrancar, si ya existe flujo_<COIN>.csv de esa moneda (reinicio, no la
-# primera vez), retoma el CVD desde la ultima fila YA GRABADA en vez de
-# resetear a 0 (ver _ultimo_cvd) - el valor esta ahi precisamente porque se
-# guarda para no perderlo. Solo empieza en 0 cuando de verdad no hay nada
-# previo (fichero nuevo).
-#
-# El libro se graba DOBLE: el resumen (bid/ask/spread/mid/microprecio/
-# imbalance, para leer rapido sin parsear JSON) Y el crudo completo
-# (bids_json/asks_json, hasta --profundidad niveles, cada
-# --libro-crudo-cada segundos) - el resumen fija niveles=10 para el
-# imbalance a proposito; el crudo permite recalcularlo despues con otro
-# 'niveles', u otra metrica que ni se nos ocurrio todavia.
-#
-# Proceso SEPARADO de cualquier logica de trading/señales (2026-08-06,
-# origen: separado en su dia de monitor.py, el bot multi-posicion que vive
-# solo en la rama master - no existe en senales-vela, ver anotaciones.md):
-# esos procesos se reinician con frecuencia (ajustes de parametros,
-# calibracion de señales), y cada reinicio cortaba esta serie sin motivo
-# real. Este proceso no tiene ninguna logica de trading, solo escribe.
-#
-# El historico de velas de Bitget (herramientas/libro/historico_*_bitget.csv)
-# NO lo mantiene este proceso - lo mantiene descargar_bit.py --feed, tambien
-# siempre corriendo en el NAS pero como proceso independiente.
-#
 # Uso (desde la raiz del repo):
 #   python herramientas/grabador_libro.py [coin[,coin2,...]] [--cada 15]
 #                             [--profundidad 1000]
@@ -103,14 +6,11 @@
 #
 # Ajuste en caliente y anadir/quitar/reiniciar una moneda SIN reiniciar el
 # proceso: dejar caer un JSON en herramientas/grabador_libro/comandos_grabador/
-# (ver _procesar_comandos) - pensado para telegram_control.py, pero vale
-# tambien a mano.
 #
 # Ejemplos:
 #   python herramientas/grabador_libro.py
 #   python herramientas/grabador_libro.py btc,eth,icp
 #   python herramientas/grabador_libro.py btc,eth --cada 30
-# ---------------------------------------------------------------
 
 import asyncio
 import csv
@@ -126,14 +26,8 @@ import ccxt.pro as ccxtpro
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mercado import datos, flujo
 
-# 2026-08-13: carpeta propia, ya no comparte herramientas/libro/ con
-# descargar_bit.py/los monitores (nota de Fran: "cada py que lanzamos
-# escriba en una carpeta").
 DIR_GRABADOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "grabador_libro")
 
-# Sin "coin": un fichero por moneda, ya no hace falta distinguir de que
-# moneda es cada fila dentro del propio CSV - lo dice el nombre del
-# fichero (flujo_<COIN>.csv).
 CAMPOS_CSV = [
     "timestamp_ms", "fecha_utc",
     "bid", "ask", "spread_bps", "mid", "microprecio",
@@ -141,12 +35,9 @@ CAMPOS_CSV = [
     "open_interest", "funding_rate_pct", "long_short_ratio",
     "n_trades", "vol_buy", "vol_sell", "delta_vol", "cvd",
     "bids_json", "asks_json",
-    "pid",  # PID del proceso que escribio la fila.
+    "pid",
 ]
 
-# Registro de huecos de conexion WS detectados (ver _recuperar_hueco) - una
-# fila por hueco, se recupere o no, para poder consultar en operaciones si
-# hay motivo de duda reciente sobre los datos.
 CAMPOS_HUECOS = [
     "timestamp_ms", "fecha_utc", "coin",
     "ts_ultimo_trade_previo", "duracion_seg", "estado",
@@ -164,18 +55,12 @@ def _flt(s):
 
 
 def _archivo(coin):
-    """flujo_<COIN>.csv en herramientas/grabador_libro/ - UN fichero POR
-    MONEDA. SIN fecha en el nombre: un reinicio debe seguir escribiendo el
-    MISMO fichero para poder retomar el CVD desde la ultima fila ya
-    grabada (ver _ultimo_cvd) en vez de perderlo cada vez que se relanza
-    el proceso."""
     os.makedirs(DIR_GRABADOR, exist_ok=True)
     return os.path.join(DIR_GRABADOR, f"flujo_{coin.upper()}.csv")
 
 
 def _ruta_compatible(ruta):
-    """Si ya existe con OTRA cabecera, no se reescribe encima - se abre
-    _v2/_v3..."""
+    """_ruta_compatible(ruta: str) -> str"""
     if not os.path.exists(ruta):
         return ruta
     with open(ruta, newline="", encoding="utf-8") as f:
@@ -197,20 +82,7 @@ def _ruta_lock(coin):
 
 
 def _pid_vivo(pid):
-    """True si el proceso 'pid' sigue vivo, SIN arriesgarse a matarlo -
-    misma logica que monitor_comun._pid_vivo (duplicada, no importada: ese
-    modulo ya importa DE grabador_libro.py, importar en el otro sentido
-    crearia un ciclo).
-
-    En POSIX (el NAS, donde corre esto normalmente), os.kill(pid, 0) es el
-    patron estandar: la señal 0 no se entrega, solo prueba existencia. En
-    Windows, os.kill() con cualquier señal que no sea CTRL_C_EVENT/
-    CTRL_BREAK_EVENT llama de verdad a TerminateProcess() - si el PID
-    leido del .lock coincidiera por casualidad con un proceso vivo en la
-    maquina Windows, esto lo mataria en vez de solo comprobarlo. Se evita
-    abriendo el proceso con permisos de SOLO CONSULTA
-    (PROCESS_QUERY_LIMITED_INFORMATION) en vez de con os.kill (ver
-    anotaciones.md 2026-08-12)."""
+    """_pid_vivo(pid: int) -> bool"""
     if sys.platform != "win32":
         try:
             os.kill(pid, 0)
@@ -221,9 +93,6 @@ def _pid_vivo(pid):
     import ctypes.wintypes as wt
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     abrir = ctypes.windll.kernel32.OpenProcess
-    # restype/argtypes explicitos: sin esto ctypes asume que OpenProcess
-    # devuelve un 'int' de 32 bits, pero un HANDLE de Windows es de 64 bits
-    # en sistemas x64.
     abrir.restype = wt.HANDLE
     abrir.argtypes = (wt.DWORD, wt.BOOL, wt.DWORD)
     handle = abrir(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
@@ -234,8 +103,7 @@ def _pid_vivo(pid):
 
 
 def _lock_libre_o_huerfano(coin):
-    """True si no hay lock para 'coin', o si lo hay pero el PID de dentro
-    ya no existe (huerfano, se puede pisar). Solo consulta, no escribe."""
+    """_lock_libre_o_huerfano(coin: str) -> bool"""
     ruta_lock = _ruta_lock(coin)
     if not os.path.exists(ruta_lock):
         return True
@@ -248,10 +116,6 @@ def _lock_libre_o_huerfano(coin):
 
 
 def _bloquear_coin(coin):
-    """Escribe el lock de 'coin' con el PID de ESTE proceso. Con el
-    proceso consolidado (2026-08-13, una conexion para varias monedas)
-    todos los locks activos de un mismo proceso llevan el MISMO pid - es
-    lo esperado, ya no significa "un proceso por moneda"."""
     with open(_ruta_lock(coin), "w") as f:
         f.write(str(os.getpid()))
 
@@ -264,18 +128,7 @@ def _desbloquear_coin(coin):
 
 
 def _bloquear_instancia_unica(coins):
-    """Arranque: si CUALQUIERA de las monedas pedidas ya tiene un lock
-    vivo, aborta ANTES de tocar ningun fichero - un arranque parcial
-    silencioso confundiria mas de lo que ayuda.
-
-    Solo COMPRUEBA, NO escribe ningun lock - eso lo hace _iniciar_coin
-    (unico sitio que adquiere el lock de una moneda, tanto al arrancar
-    como al anadir/reiniciar en caliente). Si esta funcion tambien
-    escribiera el lock, el _lock_libre_o_huerfano() de _iniciar_coin veria
-    su PROPIO lock recien escrito por este mismo proceso y se negaria a
-    arrancar - bug real, encontrado 2026-08-13 en la primera prueba en
-    vivo: las 3 monedas se rechazaban a si mismas con "ya hay un
-    grabador_libro.py corriendo"."""
+    """_bloquear_instancia_unica(coins: list[str]) -> None"""
     for coin in coins:
         if not _lock_libre_o_huerfano(coin):
             with open(_ruta_lock(coin)) as f:
@@ -288,9 +141,7 @@ def _bloquear_instancia_unica(coins):
 
 
 def _ultimo_cvd(ruta):
-    """CVD de la ultima fila ya grabada en 'ruta' - lee solo la cola del
-    fichero en vez de cargarlo entero. None si 'ruta' no existe todavia, o
-    no hay ninguna fila valida (solo cabecera)."""
+    """_ultimo_cvd(ruta: str) -> float | None"""
     if not os.path.exists(ruta):
         return None
     with open(ruta, "rb") as f:
@@ -319,15 +170,7 @@ def _ruta_cursor(coin):
 
 
 def _guardar_cursor(coin, estado):
-    """Persiste el ultimo trade_ts (y los ids de trades EN ese ts, para
-    proteger el empate de milisegundo) cada vez que se escribe una fila -
-    misma cadencia que el CVD, para que ambos queden siempre consistentes
-    entre si. Es lo que permite que _recuperar_al_arrancar() trate un
-    reinicio del proceso igual que _recuperar_hueco() ya trata un corte de
-    WS en caliente: sin esto, el tramo entre la ULTIMA fila escrita y el
-    momento real de parar el proceso (hasta --cada segundos, incluso en un
-    apagado limpio) se perderia siempre en cada reinicio, planificado o
-    no."""
+    """_guardar_cursor(coin: str, estado: dict) -> None"""
     if estado["ultimo_trade_ts"] is None:
         return
     ruta = _ruta_cursor(coin)
@@ -341,9 +184,7 @@ def _guardar_cursor(coin, estado):
 
 
 def _cargar_cursor(coin):
-    """(ultimo_trade_ts, {ids ya contados en ese ts}) del cursor persistido,
-    o (None, set()) si no existe/esta corrupto (primera vez, o un reinicio
-    tan viejo que nunca llego a escribir ninguna fila)."""
+    """_cargar_cursor(coin: str) -> (ultimo_trade_ts: int|None, ids: set)"""
     ruta = _ruta_cursor(coin)
     if not os.path.exists(ruta):
         return None, set()
@@ -355,15 +196,10 @@ def _cargar_cursor(coin):
         return None, set()
 
 
-# ---------------------------------------------------------------- ajuste en caliente
-
 PARAMS_DEFECTO = {
     "cada": 15.0, "profundidad": 1000,
     "libro_crudo_cada": 60.0, "ls_ratio_cada": 300.0,
 }
-# "funding_cada" YA NO EXISTE (2026-08-13): con REST habia que cachear el
-# poll; con el canal 'ticker' de WS el funding/OI llega empujado solo, no
-# hay nada que espaciar.
 
 LIMITES_PARAMS = {
     "cada": (1.0, 300.0), "profundidad": (1, 5000),
@@ -374,11 +210,6 @@ DIR_COMANDOS = os.path.join(DIR_GRABADOR, "comandos_grabador")
 
 
 def _ruta_config():
-    """Un unico config de PROCESO (2026-08-13) - antes se guardaba
-    keyed a la primera moneda del proceso, pero con el proceso consolidado
-    cubriendo varias monedas dinamicas (anadir_coin/quitar_coin) ya no hay
-    una moneda "representante" clara. Los 5(4) parametros siguen siendo
-    de PROCESO, no por moneda individual."""
     return os.path.join(DIR_GRABADOR, "grabador_config.json")
 
 
@@ -403,8 +234,6 @@ def _guardar_config(params):
     os.replace(tmp, ruta)
 
 
-# ---------------------------------------------------------------- estado en memoria
-
 def _crear_estado(cvd_previo):
     return {
         "cvd": cvd_previo if cvd_previo is not None else 0.0,
@@ -412,22 +241,15 @@ def _crear_estado(cvd_previo):
         "funding": None, "oi": None, "ticker_ts": None,
         "ls_ratio": None,
         "ultimo_trade_ts": None,
-        "ids_en_ultimo_ts": set(),  # ids de trades EN 'ultimo_trade_ts' (puede haber varios
-                                     # en el mismo ms) - persistido en cursor_<COIN>.json para
-                                     # que un reinicio pueda sembrar 'ids_recientes' y no
-                                     # perder la proteccion de empate que ya tiene el hueco en
-                                     # vivo (ver _guardar_cursor/_recuperar_al_arrancar).
-        "ids_recientes": {},  # {trade_id: monotonic al verlo} - dedup/red de seguridad
+        "ids_en_ultimo_ts": set(),
+        "ids_recientes": {},
         "n_trades_fila": 0, "vol_buy_fila": 0.0, "vol_sell_fila": 0.0,
         "libro_crudo_ultimo": 0.0,
     }
 
 
 def _procesar_trade(estado, t):
-    """Aplica un trade al CVD/contadores de la fila en curso, con dedup por
-    id (red de seguridad frente a redelivery en el borde de una
-    reconexion o de una recuperacion de hueco - ver cabecera del
-    archivo). Devuelve True si se conto, False si ya se habia visto."""
+    """_procesar_trade(estado: dict, t: dict) -> bool"""
     tid = t.get("id")
     if tid is not None and tid in estado["ids_recientes"]:
         return False
@@ -460,12 +282,7 @@ def _podar_ids_recientes(estado, ventana_seg=180.0):
 
 
 def _niveles_limpios(niveles, n):
-    """[precio, cantidad] de los primeros 'n' niveles - ccxt.pro guarda
-    internamente un TERCER elemento por nivel (el par crudo en string,
-    usado para el checksum CRC32 del canal incremental, ver
-    ccxt/pro/bitget.py.handle_delta) que no interesa persistir: infla el
-    JSON casi al doble sin aportar nada que _mejor/_volumen de
-    mercado/flujo.py no lean ya por indice [0]/[1]."""
+    """_niveles_limpios(niveles, n: int) -> list[[precio, cantidad], ...]"""
     return [[nivel[0], nivel[1]] for nivel in niveles[:n]]
 
 
@@ -477,17 +294,8 @@ def _toca_libro_crudo(estado, libro_crudo_cada):
     return True
 
 
-# ---------------------------------------------------------------- recuperacion de huecos
-
-UMBRAL_HUECO_SEG = 15.0  # sin actualizacion de libro en mas de esto, se asume corte
-TOPE_HUECO_SEG = 600.0  # huecos mayores de 10 min no se intentan recuperar por REST -
-                         # subido de 300 (2026-08-17): un hueco de 347.8s en ICP tras
-                         # un relanzamiento quedo sin intentar por los pelos, y Bitget
-                         # SI tenia los trades disponibles (comprobado y recuperado a
-                         # mano, ver anotaciones.md) - 300s era mas conservador de lo
-                         # necesario para el caso tipico (reinicio del proceso), sigue
-                         # habiendo un tope para no fiarse de un historico REST que en
-                         # general no es profundo (ver mercado/datos.py.trades()).
+UMBRAL_HUECO_SEG = 15.0
+TOPE_HUECO_SEG = 600.0
 TOPE_LLAMADAS_RECUPERACION = 10
 TOPE_TRADES_RECUPERACION = 5000
 
@@ -518,22 +326,10 @@ def _registrar_hueco(coin, ts_previo, duracion_seg, estado_txt, n_trades, vol):
 
 
 async def _recuperar_hueco(coin, simbolo, estado):
-    """Se llama cuando _watch_book detecta que ha pasado demasiado tiempo
-    sin actualizacion de libro (UMBRAL_HUECO_SEG) - se asume un corte de
-    WS y se intenta rellenar los trades perdidos con
-    mercado.datos.trades(desde=...) (REST, la misma funcion ya probada en
-    produccion). Acotado a TOPE_HUECO_SEG: Bitget "No tiene historico
-    profundo garantizado" (ver mercado/datos.py.trades()) - para un hueco
-    largo no merece la pena ni es fiable intentarlo, se registra como no
-    recuperado y el CVD sigue desde donde esta (mismo criterio honesto que
-    ya tenia la version REST durante un corte largo: hueco visible, no
-    dato inventado).
-
-    SIEMPRE se registra en huecos_<COIN>.csv, se recupere o no - para
-    poder consultar en operaciones si hay motivo de duda reciente."""
+    """_recuperar_hueco(coin, simbolo, estado) -> None"""
     ts_previo = estado.get("ultimo_trade_ts")
     if ts_previo is None:
-        return  # todavia no se ha visto ni un trade, nada que recuperar
+        return
 
     duracion = (int(time.time() * 1000) - ts_previo) / 1000.0
     if duracion > TOPE_HUECO_SEG:
@@ -551,15 +347,6 @@ async def _recuperar_hueco(coin, simbolo, estado):
                 break
             for t in sorted(lote, key=lambda x: x.get("timestamp") or 0):
                 tt = t.get("timestamp")
-                # < estricto, NO <=: Bitget devuelve 'since' inclusive, y
-                # puede haber varios trades reales en el MISMO milisegundo
-                # que ts_previo (documentado: hasta 37 en un solo ms) - a
-                # igualdad de timestamp, _procesar_trade() decide por id ya
-                # visto, igual que en el ingest normal (ver anotaciones.md
-                # 2026-08-12). Con <= se descartaban TODOS los del ms
-                # frontera sin comprobar id, perdiendo en silencio los que
-                # de verdad eran nuevos - mismo bug que ya se arreglo ahi,
-                # reintroducido aqui en la reescritura WS del 2026-08-13.
                 if tt is None or tt < ts_previo:
                     continue
                 if _procesar_trade(estado, t):
@@ -587,25 +374,11 @@ async def _recuperar_hueco(coin, simbolo, estado):
 
 
 async def _recuperar_al_arrancar(coin, simbolo, estado):
-    """Trata un reinicio del proceso (planificado o no, kill/crash/reinicio
-    del NAS) igual que _recuperar_hueco() ya trata un corte de WS en
-    caliente - antes SOLO se disparaba desde _watch_book() con el proceso
-    YA corriendo, asi que cualquier reinicio perdia el tramo en silencio,
-    sin pasar por huecos_<COIN>.csv ni intentar rellenarlo por REST.
-
-    'estado' ya viene sembrado en _iniciar_coin() con el cursor persistido
-    (_cargar_cursor) - mismo 'ultimo_trade_ts' + 'ids_recientes' que
-    tendria si el proceso nunca se hubiera parado, asi que _recuperar_hueco
-    puede reusarse tal cual: mismo tope de 5 minutos, mismo registro en
-    huecos_<COIN>.csv, misma proteccion de empate de milisegundo por id
-    (la razon de persistir los ids en _guardar_cursor en vez de solo el
-    timestamp)."""
+    """_recuperar_al_arrancar(coin, simbolo, estado) -> None"""
     if estado["ultimo_trade_ts"] is None:
-        return  # sin cursor previo (primera vez, o nunca llego a escribir una fila)
+        return
     await _recuperar_hueco(coin, simbolo, estado)
 
-
-# ---------------------------------------------------------------- tareas WS por moneda
 
 async def _watch_book(exchange, coin, simbolo, estado):
     while True:
@@ -613,17 +386,6 @@ async def _watch_book(exchange, coin, simbolo, estado):
             ob = await exchange.watch_order_book(simbolo)
             bids, asks = ob["bids"], ob["asks"]
             if bids and asks and bids[0][0] > asks[0][0]:
-                # Libro cruzado: el estado interno que mantiene ccxt.pro se
-                # desincronizo (visto en vivo 2026-08-16: bid congelado en un
-                # unico valor entre 1h35 y ~13h mientras ask seguia
-                # actualizandose con normalidad - ver anotaciones.md). El
-                # propio checksum de ccxt (bitget.py/handle_order_book) tarda
-                # demasiado o no siempre dispara su resuscripcion solo, asi
-                # que se fuerza aqui: se descarta esta lectura (NO se guarda
-                # en estado, para que _fila() la trate como libro
-                # desactualizado via libro_ts en vez de escribir bid/ask
-                # cruzados) y se pide a ccxt que tire su copia local del
-                # libro y vuelva a suscribirse desde cero (snapshot limpio).
                 print(f"  (aviso) libro {coin}: cruzado (bid {bids[0][0]} > ask {asks[0][0]}), "
                       f"forzando resuscripcion...")
                 await exchange.un_watch_order_book(simbolo)
@@ -670,19 +432,7 @@ async def _watch_ticker(exchange, coin, simbolo, estado):
 
 
 async def _actualizar_ls_ratio(coin, simbolo, estado, params):
-    """Unico dato que sigue siendo REST poll (Bitget no transmite L/S en
-    directo) - via run_in_executor para no bloquear el event loop de las
-    demas monedas mientras espera la respuesta HTTP.
-
-    Si Bitget no tiene long/short ratio para 'simbolo' (datos.SinDatoParaSimbolo,
-    visto en vivo con ICP: error 40054, "sin datos" es estructural, no un
-    corte momentaneo) esta tarea termina en vez de seguir reintentando cada
-    ls_ratio_cada para siempre - "long_short_ratio" queda en blanco en el
-    CSV de esa moneda (mismo criterio de "blanco si no hay dato" que ya usa
-    el resto de columnas), pero sin repetir el mismo aviso indefinidamente.
-    Se vuelve a intentar una vez si el proceso se reinicia o la moneda se
-    quita/anade en caliente - por si Bitget empieza a publicarlo mas
-    adelante (ej. si sube el volumen/interes abierto de esa moneda)."""
+    """_actualizar_ls_ratio(coin, simbolo, estado, params) -> None"""
     loop = asyncio.get_running_loop()
     while True:
         try:
@@ -700,14 +450,8 @@ async def _actualizar_ls_ratio(coin, simbolo, estado, params):
         await asyncio.sleep(params["ls_ratio_cada"])
 
 
-# ---------------------------------------------------------------- ciclo de vida por moneda
-
 def _iniciar_coin(exchange, coin, simbolo, params, estados, tareas, arch, writer):
-    """Arranca todo lo necesario para 'coin': lock, fichero CSV (retomando
-    CVD si ya existia) y las 4 tareas async. Usado tanto en el arranque
-    normal como por el comando 'anadir_coin'/'reiniciar_coin' en caliente.
-    False si ya habia un lock vivo para esta moneda (no aborta el
-    proceso entero como en el arranque - solo esta moneda no se anade)."""
+    """_iniciar_coin(exchange, coin, simbolo, params, estados, tareas, arch, writer) -> bool"""
     if not _lock_libre_o_huerfano(coin):
         print(f"(aviso) {coin}: ya hay un grabador_libro.py corriendo para esta moneda, no se anade.")
         return False
@@ -729,11 +473,6 @@ def _iniciar_coin(exchange, coin, simbolo, params, estados, tareas, arch, writer
         print(f"  {coin}: CVD arranca en 0 (sin fichero previo, o con cabecera pero sin filas)")
 
     estado = estados[coin]
-    # Cursor persistido (ver _guardar_cursor) - siembra ultimo_trade_ts/
-    # ids_recientes ANTES de arrancar las tareas, para que
-    # _recuperar_al_arrancar() pueda tratar el tramo hasta ahora igual que
-    # un hueco de WS en caliente (ver su cabecera). None/vacio si es la
-    # primera vez o no habia cursor previo - no rompe el arranque normal.
     ts_cursor, ids_cursor = _cargar_cursor(coin)
     if ts_cursor is not None:
         estado["ultimo_trade_ts"] = ts_cursor
@@ -752,9 +491,7 @@ def _iniciar_coin(exchange, coin, simbolo, params, estados, tareas, arch, writer
 
 
 async def _detener_coin(coin, estados, tareas, arch, writer):
-    """Cancela las tareas de 'coin', espera a que terminen de verdad,
-    cierra su CSV y libera su lock - usado por 'quitar_coin' y como mitad
-    de 'reiniciar_coin'."""
+    """_detener_coin(coin, estados, tareas, arch, writer) -> None"""
     lista = tareas.pop(coin, [])
     for t in lista:
         t.cancel()
@@ -775,15 +512,8 @@ async def _reiniciar_coin(exchange, coin, simbolo, params, estados, tareas, arch
     print(f"(comando) {coin}: reiniciada en caliente.")
 
 
-# ---------------------------------------------------------------- comandos en caliente
-
 def _procesar_comandos(exchange, coins_activas, params, simbolos, estados, tareas, arch, writer):
-    """Revisa DIR_COMANDOS por comandos pendientes - ajuste de los 4
-    parametros de proceso, reset a valores por defecto, y (2026-08-13,
-    nuevo con el proceso consolidado) anadir/quitar/reiniciar una moneda
-    SIN reiniciar el proceso entero (antes, con un proceso por moneda,
-    esto se hacia con kill+relanzar; ahora eso tumbaria TODAS las monedas
-    de golpe)."""
+    """_procesar_comandos(...) -> None. Lee JSON pendientes en DIR_COMANDOS."""
     if not os.path.isdir(DIR_COMANDOS):
         return
     for nombre in os.listdir(DIR_COMANDOS):
@@ -830,9 +560,6 @@ def _procesar_comandos(exchange, coins_activas, params, simbolos, estados, tarea
             continue
 
         if coin_cmd not in coins_activas:
-            # comando de ajuste de parametro/reset para una moneda que
-            # este proceso no cubre - no es para nosotros, se deja intacto
-            # por si lo recoge otro proceso.
             continue
 
         if accion == "reset":
@@ -865,16 +592,8 @@ def _procesar_comandos(exchange, coins_activas, params, simbolos, estados, tarea
         os.remove(ruta_cmd)
 
 
-# ---------------------------------------------------------------- fila del CSV
-
 def _fila(coin, estado, params):
-    """Una fila del CSV a partir del estado en memoria (mantenido por las
-    tareas WS) - NO pide nada activamente, solo muestrea lo que ya hay.
-    Si el libro/ticker no se ha actualizado en mas de UMBRAL_HUECO_SEG (o
-    2x --cada, lo que sea mayor), se deja en blanco en vez de repetir el
-    ultimo valor conocido - mismo contrato honesto que ya tenia la version
-    REST durante un corte (Fran, 2026-08-13: preferido a fingir datos
-    frescos que no lo son)."""
+    """_fila(coin, estado, params) -> dict, una fila del CSV"""
     ahora_mono = time.monotonic()
     umbral = max(2 * params["cada"], UMBRAL_HUECO_SEG)
     fresco_libro = estado["libro_ts"] is not None and (ahora_mono - estado["libro_ts"]) <= umbral
@@ -921,8 +640,6 @@ def _fila(coin, estado, params):
     }
 
 
-# ---------------------------------------------------------------- main
-
 async def main_async():
     args = sys.argv[1:]
     if args and not args[0].startswith("--"):
@@ -956,13 +673,6 @@ async def main_async():
         if valor is not None:
             params[clave] = valor
 
-    # session con ThreadedResolver (2026-08-14, ver anotaciones.md): sin
-    # esto, aiohttp usa aiodns por defecto si esta instalado - en Windows
-    # aiodns falla con "Could not contact DNS servers" en la primera
-    # llamada real (confirmado en vivo: load_markets() de ESTA misma
-    # construccion, sin session propia, contra Windows real de Fran).
-    # ThreadedResolver no depende de aiodns/pycares, usa getaddrinfo()
-    # estandar - funciona igual en Linux, donde ya corre este proceso hoy.
     _conector_ws = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
     _session_ws = aiohttp.ClientSession(connector=_conector_ws)
     exchange = ccxtpro.bitget({

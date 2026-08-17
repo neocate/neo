@@ -1,3 +1,5 @@
+https://manus.im/share/nwZvFYs4qM6ohWB6utQCRs
+
 kill -INT
 ps -ef | grep herramientas | grep -v grep
 
@@ -24,7 +26,7 @@ nohup venv/bin/python -u herramientas/niveles.py --actualizar eth 15m --k 3 --to
 
 
 
-cd \\NAS_OFICINA\homes\Fran\neo\historicos
+cd \\NAS_OFICINA\homes\Fran\neo-verificado\historicos
 python descargar_bin.py eth 1m
 python descargar_bin.py eth 3m
 python descargar_bin.py eth 5m
@@ -44,28 +46,28 @@ python descargar_bin.py btc 1d
 
 
 
-cd \\NAS_OFICINA\homes\Fran\neo\herramientas
-python descargar_bit.py --velas icp 1m 2023-01-01 
-python descargar_bit.py --velas icp 3m 2023-01-01 
-python descargar_bit.py --velas icp 5m 2023-01-01 
-python descargar_bit.py --velas icp 15m 2023-01-01 
-python descargar_bit.py --velas icp 1h 2023-01-01 
-python descargar_bit.py --velas icp 4h 2023-01-01 
-python descargar_bit.py --velas icp 1d 2023-01-01 
-python descargar_bit.py --velas eth 1m 2023-01-01 
-python descargar_bit.py --velas eth 3m 2023-01-01 
-python descargar_bit.py --velas eth 5m 2023-01-01 
-python descargar_bit.py --velas eth 15m 2023-01-01 
-python descargar_bit.py --velas eth 1h 2023-01-01 
-python descargar_bit.py --velas eth 4h 2023-01-01 
-python descargar_bit.py --velas eth 1d 2023-01-01 
-python descargar_bit.py --velas btc 1m 2023-01-01 
-python descargar_bit.py --velas btc 3m 2023-01-01 
-python descargar_bit.py --velas btc 5m 2023-01-01 
-python descargar_bit.py --velas btc 15m 2023-01-01 
-python descargar_bit.py --velas btc 1h 2023-01-01 
-python descargar_bit.py --velas btc 4h 2023-01-01 
-python descargar_bit.py --velas btc 1d 2023-01-01 
+cd \\NAS_OFICINA\homes\Fran\neo-verificado\herramientas
+python descargar_bit.py --velas icp 1m
+python descargar_bit.py --velas icp 3m
+python descargar_bit.py --velas icp 5m
+python descargar_bit.py --velas icp 15m
+python descargar_bit.py --velas icp 1h
+python descargar_bit.py --velas icp 4h
+python descargar_bit.py --velas icp 1d
+python descargar_bit.py --velas eth 1m
+python descargar_bit.py --velas eth 3m
+python descargar_bit.py --velas eth 5m
+python descargar_bit.py --velas eth 15m
+python descargar_bit.py --velas eth 1h
+python descargar_bit.py --velas eth 4h
+python descargar_bit.py --velas eth 1d
+python descargar_bit.py --velas btc 1m
+python descargar_bit.py --velas btc 3m
+python descargar_bit.py --velas btc 5m
+python descargar_bit.py --velas btc 15m
+python descargar_bit.py --velas btc 1h
+python descargar_bit.py --velas btc 4h
+python descargar_bit.py --velas btc 1d
 
 
 

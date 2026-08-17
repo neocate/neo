@@ -1,38 +1,5 @@
-# ---------------------------------------------------------------
-# monitor_telegram.py - Unico responsable de mandar Telegram cuando salta
-# una señal confirmada. Antes esto vivia dentro de monitor_senales.py
-# (avisos.enviar() inline, sacado de ahi el 2026-08-11) - se separa por el
-# mismo motivo que ya separo señales de niveles: notificar es una
-# responsabilidad distinta de detectar, y no tiene sentido reiniciar la
-# deteccion de señales solo para ajustar como/cuando se notifica (o al
-# reves).
-#
-# Proceso UNICO y GLOBAL, sin coin/tf: descubre TODOS los
-# herramientas/libro/senales_<COIN>_<TF>.csv que haya (los escribe
-# monitor_senales.py, uno por cada instancia que tengas corriendo) y los
-# sigue en vivo, re-escaneando el directorio cada vuelta para engancharse
-# tambien a los que aparezcan despues (si lanzas mas monitor_senales.py mas
-# tarde, sin tener que reiniciar esto). Telegram es un unico canal de
-# avisos del proyecto entero - no tiene sentido un proceso de notificacion
-# por cada coin/tf.
-#
-# Al descubrir un fichero nuevo se posiciona al FINAL (no relee ni notifica
-# nada del historico viejo - mismo criterio que monitor_niveles.py/
-# monitor_senales.py con flujo_*.csv).
-#
-# De cada fila con evento="senal", solo manda Telegram si su 'tipo' esta en
-# mercado.senales.REFINADAS_CONFIRMADAS - monitor_senales.py loguea TODO lo
-# que detecta (las 4 CONFIRMADAS, las 3 EN_PRUEBAS -desde 2026-08-12, para
-# que fjsl.py pueda seguir midiendolas- y lo que quede fuera del Grupo A),
-# este filtro es el UNICO punto que decide que de eso se manda de verdad.
-#
-# Via alertas.avisos.enviar(). Sin TELEGRAM_TOKEN/TELEGRAM_CHAT_ID en .env,
-# enviar() no hace nada - no hace falta configurarlo para que el resto del
-# proyecto funcione.
-#
 # Uso:
 #   python herramientas/monitor_telegram.py [--cada 15] [--latido-cada 1800]
-# ---------------------------------------------------------------
 
 import os
 import re
@@ -48,7 +15,7 @@ _PATRON = re.compile(r"^senales_(?:\d+_)?([A-Z0-9]+)_(.+)\.csv$")
 
 
 def _localizar_senales_csv():
-    """(ruta, coin, tf) de todos los senales_*.csv en herramientas/libro/."""
+    """_localizar_senales_csv() -> list[(ruta, coin, tf)]"""
     if not os.path.isdir(DIR_LIBRO):
         return []
     out = []
@@ -101,9 +68,6 @@ def main():
                     print(f"  >>> TELEGRAM {coin} {tf}  {nombre}  cierre {precio}  ({fecha} UTC)")
                     avisos.enviar(f"{coin} {tf}  {nombre}\ncierre {precio}  ({fecha} UTC)")
 
-            # Latido periodico: sin esto, el log se queda mudo entre señales
-            # (pueden pasar horas) y no hay forma de distinguir "vivo, sin
-            # novedades" de "colgado" solo mirando el fichero de log.
             if time.monotonic() - ultimo_latido >= latido_cada:
                 ultimo_latido = time.monotonic()
                 objetivos = ", ".join(f"{coin} {tf}" for _, coin, tf in ficheros) or "ninguno todavia"

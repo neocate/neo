@@ -1,19 +1,5 @@
-# ---------------------------------------------------------------
-# test_config_caliente.py - Verifica el patron de config en caliente
-# (PARAMS_DEFECTO/cargar_params()/guardar_params()) en los tres modulos que
-# lo implementan: mercado.indicadores, mercado.senales, herramientas.niveles.
-#
-# Comprueba, para cada uno:
-#   1. Sin *_config.json: el comportamiento es IDENTICO al de siempre
-#      (mismos valores que pasando el parametro explicito a mano).
-#   2. Con *_config.json: cambiar un valor ahi SI cambia el resultado
-#      (hot-reload de verdad, no solo un default que nunca se lee).
-#   3. guardar_params() rechaza valores fuera de LIMITES_PARAMS.
-# Limpia cualquier *_config.json de prueba al terminar - deja los tres
-# modulos exactamente como estaban (sin JSON) al acabar.
-#
 # Uso: python herramientas/verificacion/test_config_caliente.py
-# ---------------------------------------------------------------
+
 import csv
 import os
 import sys
@@ -48,11 +34,6 @@ def _limpiar(modulo):
 
 
 def _forzar_relectura(modulo):
-    """cargar_params() tiene un margen de INTERVALO_RECOMPROBAR segundos
-    antes de volver a mirar el mtime en disco (ver su comentario en cada
-    modulo - evita golpear la red del NAS en bucles ajustados). Para un
-    test que escribe el JSON y quiere ver el efecto YA, hay que resetear
-    el reloj de la cache a mano en vez de esperar el margen real."""
     modulo._cache_verificado = 0.0
 
 
@@ -77,7 +58,7 @@ def test_senales(velas):
     assert sen.detectar(velas, k=3) == sen.detectar(velas, k=3, ventana_ruptura=30), \
         "senales: default != explicito sin json"
     cierres = [v[4] for v in velas]
-    atr_actual = 100.0  # valor de prueba, no importa la escala real aqui
+    atr_actual = 100.0
     assert sen._impulso(cierres, atr_actual) == sen._impulso(cierres, atr_actual, umbral=2.5), \
         "senales: default de _impulso != explicito sin json"
     sen.guardar_params({"umbral_impulso_atr": 0.01})

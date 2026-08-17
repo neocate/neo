@@ -1,21 +1,5 @@
-# ---------------------------------------------------------------
-# verificar_niveles.py - Verifica el arreglo de niveles.py del 2026-08-17
-# (atr_ref congelado + divergencia incremental-vs-lote, ver anotaciones.md)
-# contra datos reales, sin tocar los listados de produccion:
-#
-#   1. determinismo: _analizar() llamado dos veces con los mismos
-#      parametros y datos da EXACTAMENTE lo mismo.
-#   2. _anotar_diferencias() no genera una avalancha de eventos falsos al
-#      comparar un listado real contra un recalculo fresco.
-#   3. _actualizar() fuerza el recalculo en la primera llamada de un
-#      (coin, tf) en el proceso aunque no haya velas nuevas (bug real
-#      visto al relanzar los 9 procesos la primera vez) - la segunda
-#      llamada respeta el atajo "ya esta al dia" con normalidad.
-#      Se prueba sobre una carpeta de prueba aislada (nunca toca
-#      herramientas/niveles/<COIN>/ real).
-#
 # Uso: python herramientas/verificacion/verificar_niveles.py [coin] [tf]
-# ---------------------------------------------------------------
+
 import csv
 import io
 import json

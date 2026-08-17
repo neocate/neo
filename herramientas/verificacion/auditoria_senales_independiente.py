@@ -1,24 +1,6 @@
-# ---------------------------------------------------------------
-# auditoria_senales_independiente.py - Auditoria senales x niveles que NO
-# reutiliza herramientas/backtest_senales.py (ni su DIRECCION_ESPERADA, ni
-# NIVEL_UTIL_GRUPO_A, ni su logica favorable/contrario - ver anotaciones.md
-# 2026-08-17: esas tres cosas son afirmaciones del propio proyecto sin
-# verificar de forma independiente, y NIVEL_UTIL_GRUPO_A/favorable-contrario
-# ademas miden cosas contradictorias entre si para las señales del Grupo A).
-#
-# Usa unicamente:
-#   - velas crudas de historicos/ (lector propio)
-#   - niveles.detectar_niveles()/_evaluar_estado()/_rol_efectivo() (puras,
-#     verificadas por separado en verificar_niveles.py)
-#   - senales.detectar() SIN niveles_vigentes (nombres base, sin renombrar)
-#
-# Para cada disparo, mide la cercania a techo Y a suelo POR SEPARADO (nunca
-# una sola, nunca asumiendo cual "deberia" ayudar) y el retorno futuro SIN
-# signo - la direccion se lee de los resultados, no se asume al empezar.
-#
 # Uso:
 #   python herramientas/verificacion/auditoria_senales_independiente.py <coin> <tf> [--desde YYYY-MM-DD]
-# ---------------------------------------------------------------
+
 import csv
 import os
 import re
@@ -49,7 +31,7 @@ def cargar_velas(ruta, desde_ms=None, hasta_ms=None):
 
 
 def niveles_vigentes_en(velas, hasta_idx, lookback_ms, k, tolerancia_atr, toques_min, confirmacion_velas):
-    """Niveles vigentes usando SOLO velas[:hasta_idx] (sin fuga de futuro)."""
+    """niveles_vigentes_en(velas, hasta_idx, lookback_ms, k, tolerancia_atr, toques_min, confirmacion_velas) -> (list[(precio, tipo, rol)], tolerancia: float)"""
     ts_ref = velas[hasta_idx][0]
     previas = [v for v in velas[:hasta_idx] if v[0] >= ts_ref - lookback_ms]
     if len(previas) < 100:

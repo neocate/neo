@@ -1,24 +1,5 @@
-# ---------------------------------------------------------------
-# buscar_libro_atascado.py - Busca rachas donde bid+ask de
-# herramientas/grabador_libro/flujo_<COIN>.csv se quedan EXACTAMENTE
-# congelados mucho tiempo con trades reales de por medio, y las cruza
-# contra las velas de 1m (fuente independiente, REST) para distinguir
-# mercado genuinamente plano de un libro realmente atascado.
-#
-# OJO (2026-08-17, ver anotaciones.md): el primer intento de esta
-# comprobacion comparaba el RANGO TOTAL de precio real durante toda la
-# racha contra el spread registrado, y eso dio muchos falsos positivos -
-# una racha larga de mercado plano seguida de un movimiento real al final
-# hace que el rango total parezca grande aunque el libro haya reaccionado
-# bien, en la misma vela, al movimiento real. La comprobacion fiable es
-# grano a grano (15s) contra n_trades/vol_buy/vol_sell de la propia
-# flujo_<COIN>.csv, no contra el rango agregado de toda la racha - este
-# script solo hace la deteccion de rachas; para el veredicto final hay que
-# mirar las filas exactas del final de cada racha a mano (ver ejemplo en
-# anotaciones.md 2026-08-17).
-#
 # Uso: python herramientas/verificacion/buscar_libro_atascado.py [coin ...]
-# ---------------------------------------------------------------
+
 import csv
 import os
 import sys
@@ -35,7 +16,7 @@ def cargar_velas_1m(coin):
         r = csv.reader(f)
         next(r)
         for row in r:
-            velas[int(row[0])] = (float(row[3]), float(row[4]))  # high, low
+            velas[int(row[0])] = (float(row[3]), float(row[4]))
     return velas
 
 

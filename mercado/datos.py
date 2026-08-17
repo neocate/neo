@@ -1,14 +1,9 @@
-# ---------------------------------------------------------------
-# datos.py - Capa 1: Datos de mercado (CCXT + Bitget)
-# ---------------------------------------------------------------
-
 import ccxt
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Cliente CCXT para Bitget
 _cliente = None
 
 def _init_cliente():
@@ -23,32 +18,18 @@ def _init_cliente():
     return _cliente
 
 def normalizar_simbolo(par, tipo_mercado, modo=None):
-    """Normaliza símbolo según tipo de mercado.
-
-    Args:
-        par: str (ej: 'eth', 'btc' - o un símbolo YA normalizado como
-             'ETH/USDT:USDT', que se deja intacto tal cual venga, mismo
-             criterio que herramientas/descargar_bit.py._simbolo)
-        tipo_mercado: 'f' (futuros), 'm' (margen), 's' (spot)
-        modo: 'isolated' o 'cross' (solo aplica a margen/futuros)
-              default: 'cross' para futuros, 'isolated' para margen
-
-    Returns:
-        tuple: (simbolo, modo_efectivo)
-               ej: ('ETH/USDT:USDT', 'cross') para futuros
-    """
+    """normalizar_simbolo(par: str, tipo_mercado: 'f'|'m'|'s', modo: 'cross'|'isolated'|None = None) -> (simbolo: str, modo: str|None)"""
     if '/' in par:
         return par.upper(), modo
     simbolo_base = f"{par.upper()}/USDT"
     tipo = tipo_mercado.lower()
 
-    # Determinar modo por defecto según tipo
     if modo is None:
         if tipo == 'f':
             modo = 'cross'
         elif tipo == 'm':
             modo = 'isolated'
-        else:  # spot
+        else:
             modo = None
 
     if tipo == 'f':
@@ -57,16 +38,7 @@ def normalizar_simbolo(par, tipo_mercado, modo=None):
         return simbolo_base, modo
 
 def velas(simbolo, timeframe, cantidad=100):
-    """Trae velas OHLCV de Bitget.
-
-    Args:
-        simbolo: str (ej: 'ETH/USDT:USDT')
-        timeframe: str (ej: '3m', '15m', '1h', '4h')
-        cantidad: int (cuántas velas traer)
-
-    Returns:
-        list: [[timestamp, open, high, low, close, volume], ...]
-    """
+    """velas(simbolo: str, timeframe: str, cantidad: int = 100) -> list[[ts, open, high, low, close, volume], ...]"""
     cliente = _init_cliente()
     try:
         ohlcv = cliente.fetch_ohlcv(simbolo, timeframe, limit=cantidad)
@@ -75,14 +47,7 @@ def velas(simbolo, timeframe, cantidad=100):
         raise ValueError(f"Error trayendo velas {simbolo}: {e}")
 
 def precio(simbolo):
-    """Obtiene precio actual de mercado.
-
-    Args:
-        simbolo: str (ej: 'ETH/USDT:USDT')
-
-    Returns:
-        float: precio último
-    """
+    """precio(simbolo: str) -> float"""
     cliente = _init_cliente()
     try:
         ticker = cliente.fetch_ticker(simbolo)
@@ -91,15 +56,7 @@ def precio(simbolo):
         raise ValueError(f"Error obteniendo precio {simbolo}: {e}")
 
 def libro(simbolo, depth=20):
-    """Obtiene libro de órdenes (bids/asks).
-
-    Args:
-        simbolo: str (ej: 'ETH/USDT:USDT')
-        depth: int (profundidad, por defecto 20)
-
-    Returns:
-        dict: {'bids': [[precio, cantidad], ...], 'asks': [[precio, cantidad], ...]}
-    """
+    """libro(simbolo: str, depth: int = 20) -> {'bids': [[precio, cantidad], ...], 'asks': [[precio, cantidad], ...]}"""
     cliente = _init_cliente()
     try:
         orderbook = cliente.fetch_order_book(simbolo, limit=depth)
@@ -111,16 +68,7 @@ def libro(simbolo, depth=20):
         raise ValueError(f"Error obteniendo libro {simbolo}: {e}")
 
 def funding_rate(simbolo):
-    """Obtiene el funding rate ACTUAL del contrato perpetuo.
-
-    Args:
-        simbolo: str (ej: 'BTC/USDT:USDT')
-
-    Returns:
-        float o None: tasa de funding del periodo vigente (ej: 0.0001 =
-        0.01%). None si el simbolo no es un perpetuo o el exchange no
-        reporta nada en ese momento.
-    """
+    """funding_rate(simbolo: str) -> float | None"""
     cliente = _init_cliente()
     try:
         r = cliente.fetch_funding_rate(simbolo)
@@ -129,18 +77,7 @@ def funding_rate(simbolo):
         raise ValueError(f"Error obteniendo funding rate {simbolo}: {e}")
 
 def open_interest(simbolo):
-    """Obtiene el open interest ACTUAL del contrato perpetuo.
-
-    Bitget (via ccxt) no ofrece historial de open interest, solo esta
-    lectura instantanea - cualquier serie/ventana hay que acumularla
-    llamando esto repetidas veces con el tiempo (ver monitor.py).
-
-    Args:
-        simbolo: str (ej: 'BTC/USDT:USDT')
-
-    Returns:
-        float o None: cantidad de contratos abiertos (openInterestAmount).
-    """
+    """open_interest(simbolo: str) -> float | None"""
     cliente = _init_cliente()
     try:
         r = cliente.fetch_open_interest(simbolo)
@@ -149,21 +86,7 @@ def open_interest(simbolo):
         raise ValueError(f"Error obteniendo open interest {simbolo}: {e}")
 
 def trades(simbolo, desde=None, limite=500):
-    """Trae operaciones EJECUTADAS recientes (con lado agresor: buy/sell).
-
-    Es la materia prima del CVD / trade flow: a diferencia del libro (liquidez
-    en reposo), esto es volumen que YA cruzo, con su agresor. No tiene
-    historico profundo garantizado en Bitget -> hay que grabarlo en vivo si
-    se quiere una serie continua (ver herramientas/grabador_libro.py).
-
-    Args:
-        simbolo: str (ej: 'BTC/USDT:USDT')
-        desde: int ms (solo operaciones posteriores) o None (las mas recientes)
-        limite: int (maximo de trades a traer)
-
-    Returns:
-        list[dict]: cada uno con 'timestamp', 'price', 'amount', 'side', ...
-    """
+    """trades(simbolo: str, desde: int(ms)|None = None, limite: int = 500) -> list[dict]"""
     cliente = _init_cliente()
     try:
         return cliente.fetch_trades(simbolo, since=desde, limit=limite)
@@ -171,39 +94,11 @@ def trades(simbolo, desde=None, limite=500):
         raise ValueError(f"Error trayendo trades {simbolo}: {e}")
 
 class SinDatoParaSimbolo(ValueError):
-    """El exchange respondio explicitamente 'sin datos' para este simbolo en
-    este endpoint (ej. Bitget 40054, 'the data fetched by X is empty') - NO
-    es un fallo transitorio (red, rate limit, mercado caido), es que el dato
-    no existe de forma estructural para ese simbolo (visto en la practica:
-    Bitget no calcula long/short ratio para ICPUSDT, aunque si para BTCUSDT/
-    ETHUSDT - probablemente por volumen/interes abierto insuficiente).
-    Quien llama puede dejar de reintentar en vez de tratarlo como un error
-    momentaneo que se vaya a resolver solo."""
     pass
 
 
 def long_short_ratio(simbolo, timeframe='1h'):
-    """Ratio agregado de cuentas en largo vs en corto del mercado (NO tu
-    propia posicion) - posicionamiento del mercado de derivados, endpoint
-    publico de Bitget. Devuelve el punto MAS RECIENTE.
-
-    OJO: el endpoint de Bitget no pagina por 'since'/'limit' de forma fiable
-    (devuelve una ventana fija propia, ~30h vista en pruebas) - por eso esto
-    siempre toma el ultimo elemento de lo que venga, no confia en los
-    parametros para acotar el rango.
-
-    Args:
-        simbolo: str (ej: 'BTC/USDT:USDT')
-        timeframe: str (ej: '1h', '4h', '1d')
-
-    Returns:
-        float o None: longShortRatio (>1 = mas cuentas en largo que en corto).
-
-    Raises:
-        SinDatoParaSimbolo: Bitget devolvio el codigo 40054 (sin datos para
-            este simbolo) - ver la clase para el motivo de separarlo del
-            resto de errores.
-    """
+    """long_short_ratio(simbolo: str, timeframe: str = '1h') -> float | None. Raises SinDatoParaSimbolo."""
     cliente = _init_cliente()
     try:
         serie = cliente.fetch_long_short_ratio_history(simbolo, timeframe=timeframe, limit=1)
@@ -214,4 +109,3 @@ def long_short_ratio(simbolo, timeframe='1h'):
         if '"code":"40054"' in str(e):
             raise SinDatoParaSimbolo(f"Bitget no publica long/short ratio para {simbolo}: {e}")
         raise ValueError(f"Error obteniendo long/short ratio {simbolo}: {e}")
-

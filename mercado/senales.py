@@ -1,43 +1,10 @@
-# ---------------------------------------------------------------
-# senales.py - Capa 2: señales de VELA (impulso, ruptura, rechazo,
-# divergencia RSI) sobre velas YA CERRADAS.
-#
-# A diferencia de flujo.py (libro de ordenes - irrepetible, ver su cabecera
-# y la de herramientas/grabador_libro.py), esto trabaja sobre velas: se
-# puede recalcular en frio en cualquier momento porque el exchange guarda
-# su historico (mismo motivo por el que grabador_libro.py NO necesita
-# grabar velas en vivo, solo refrescarlas).
-#
-# Todas las señales se evaluan sobre la ULTIMA vela de 'velas' (se asume
-# cerrada - mismo criterio que descargar_bit.py, que nunca descarga la
-# vela en curso). 'velas' es una lista de [timestamp, open, high, low,
-# close, volumen], ordenada de mas vieja a mas nueva.
-# ---------------------------------------------------------------
-
 import json
 import os
 import time
 
 from mercado import indicadores
 
-# Parametros en caliente (2026-08-17, mismo patron que mercado/indicadores.py
-# y herramientas/niveles.py): los umbrales/ventanas de mas abajo ya NO son
-# constantes de modulo fijas - son los valores por defecto de
-# PARAMS_DEFECTO, sobreescribibles sin tocar codigo via senales_config.json
-# (pensado para telegram_control.py mas adelante, de momento nada escribe
-# ahi todavia). Si el fichero no existe, el comportamiento es identico al
-# de siempre.
 PARAMS_DEFECTO = {
-    # Tope de velas recientes que 'detectar()' realmente necesita mirar.
-    # ATR/RSI de indicadores.py son O(N) y recalculan la serie ENTERA desde
-    # el principio en cada llamada - si el caller (monitor_niveles.py) pasa
-    # el historico completo (90 dias de 1m son ~130k filas) y llama a
-    # detectar() en CADA vela nueva, el costo por vela crece sin limite
-    # mientras el proceso siga vivo. El suavizado de Wilder (ATR/RSI) decae
-    # exponencialmente: a partir de unas pocas centenas de velas la
-    # diferencia frente a usar todo el historico es insignificante, y de
-    # sobra para varios swings de extremos_locales incluso con k grande -
-    # asi que se puede truncar sin perder precision real.
     "ventana_maxima": 500,
     "ventana_ruptura": 30,
     "ventana_impulso": 3,
@@ -59,15 +26,6 @@ LIMITES_PARAMS = {
     "rsi_sobreventa": (0.0, 50.0),
 }
 
-# Compatibilidad hacia atras: descargar_bit.py/backtest_senales.py/
-# monitor_senales.py referencian VENTANA_MAXIMA como constante de modulo
-# directa (import o 'senales.VENTANA_MAXIMA'), no via cargar_params() - se
-# mantiene aqui con el valor de PARAMS_DEFECTO para no romperlos. OJO: esta
-# copia se fija al importar el modulo, NO es "caliente" (si se cambia
-# 'ventana_maxima' en senales_config.json despues de importar, estos tres
-# ficheros no se enteran sin reiniciar su proceso) - dentro de este mismo
-# modulo, detectar() SI usa cargar_params()['ventana_maxima'] en cada
-# llamada, eso si es caliente de verdad.
 VENTANA_MAXIMA = PARAMS_DEFECTO["ventana_maxima"]
 
 
@@ -77,24 +35,13 @@ def _ruta_config():
 
 _cache_params = None
 _cache_mtime = None
-_cache_verificado = 0.0  # time.monotonic() de la ultima comprobacion de mtime
+_cache_verificado = 0.0
 
-# Minimo de segundos entre comprobaciones de mtime en disco (2026-08-17,
-# bug real en vivo, ver mismo comentario en mercado/indicadores.py): el
-# proyecto vive en un share de red (NAS), y detectar() se llama UNA VEZ POR
-# VELA desde herramientas/backtest_senales.py (cientos de miles de velas en
-# el historico completo de Binance) - sin este throttle, cada llamada a
-# detectar() disparaba varios viajes de red (uno por cada _impulso/
-# _aceleracion/_ruptura/_rechazo/_rsi_giro/detectar que resuelve un
-# parametro a None), convirtiendo un backtest de segundos en uno de horas.
 INTERVALO_RECOMPROBAR = 2.0
 
 
 def cargar_params():
-    """PARAMS_DEFECTO + lo que haya en senales_config.json (si existe) -
-    cacheado por mtime del fichero (y el propio mtime solo se comprueba como
-    mucho cada INTERVALO_RECOMPROBAR segundos, ver su comentario) para no
-    releerlo/parsearlo en cada llamada a detectar()."""
+    """cargar_params() -> dict, PARAMS_DEFECTO + senales_config.json (si existe)"""
     global _cache_params, _cache_mtime, _cache_verificado
     ahora = time.monotonic()
     if _cache_params is not None and (ahora - _cache_verificado) < INTERVALO_RECOMPROBAR:
@@ -119,12 +66,7 @@ def cargar_params():
 
 
 def guardar_params(params):
-    """Escribe 'params' (solo claves conocidas de PARAMS_DEFECTO, dentro de
-    LIMITES_PARAMS) en senales_config.json - pensado para
-    telegram_control.py mas adelante (de momento nada lo llama todavia).
-    Escritura atomica (tmp + os.replace), mismo patron que
-    herramientas/grabador_libro.py._guardar_config /
-    mercado/indicadores.py.guardar_params."""
+    """guardar_params(params: dict) -> None. Escribe en senales_config.json, valida contra LIMITES_PARAMS."""
     a_guardar = dict(cargar_params())
     for k, v in params.items():
         if k not in PARAMS_DEFECTO:
@@ -139,30 +81,6 @@ def guardar_params(params):
         json.dump(a_guardar, f)
     os.replace(tmp, ruta)
 
-# Grupo A (backtest offline contra niveles.py, ver
-# herramientas/backtest_senales.py --tolerancia-atr/--toques-min): estas 7
-# señales dan mejor edge cuando hay un nivel VIGENTE del tipo "contrario" a
-# su propia direccion cerca (ej. ruptura_alza funciona mejor rompiendo una
-# resistencia real que en espacio abierto) - justo lo opuesto de la
-# intuicion ingenua de "nivel a mi favor cerca". Sin ese nivel util cerca,
-# el backtest no les encontro borde real - por eso detectar() las descarta
-# en vez de emitirlas tal cual cuando se le pasan niveles_vigentes.
-#
-# Backtest 2018-11-15 -> 2022-01-01, BTC y ETH, 15m/1h/4h, agregado desde
-# 1m, niveles recalculados cada 30 dias (ver git log de backtest_senales.py
-# para la corrida completa) - edge@30 CONFIRMADO (positivo en las 6
-# combinaciones moneda/TF) solo en 4 de las 7:
-#   ruptura_alza_en_resistencia, aceleracion_baja_en_soporte,
-#   rechazo_max_en_soporte, ruptura_baja_en_soporte
-# Las otras 3 mejoraron frente a su version sin filtrar pero siguen sin
-# edge fiable (positivo en unas combinaciones, negativo en otras):
-#   rsi_sobrecompra_en_soporte, rsi_sobreventa_en_resistencia,
-#   div_bajista_en_soporte
-# Es decir: el filtro de nivel es necesario pero NO suficiente para esas 3 -
-# antes de darlas por buenas en vivo, probablemente les falte un filtro de
-# regimen (tendencia neta del periodo, ver hallazgo de rsi_sobreventa
-# cambiando de signo entre la ventana 2022-2026 alcista y la 2018-2022
-# mixta) u otra vuelta de calibracion.
 NIVEL_UTIL_GRUPO_A = {
     "ruptura_alza": "techo",
     "rsi_sobreventa": "techo",
@@ -181,8 +99,6 @@ NOMBRE_REFINADO = {
     "div_bajista": "div_bajista_en_soporte",
     "rsi_sobrecompra": "rsi_sobrecompra_en_soporte",
 }
-# Edge@30 confirmado (positivo, consistente BTC+ETH, 15m/1h/4h) vs todavia
-# en pruebas (mejoro pero no fiable aun) - ver comentario de arriba.
 REFINADAS_CONFIRMADAS = {
     "ruptura_alza_en_resistencia", "aceleracion_baja_en_soporte",
     "rechazo_max_en_soporte", "ruptura_baja_en_soporte",
@@ -199,9 +115,7 @@ def _series(velas):
 
 
 def _impulso(cierres, atr_actual, ventana=None, umbral=None):
-    """'impulso_alza'/'impulso_baja': las ultimas 'ventana' velas se
-    movieron, en conjunto (cierre actual contra el cierre de hace 'ventana'
-    velas), mas de 'umbral'xATR en una direccion."""
+    """_impulso(cierres, atr_actual, ventana=None, umbral=None) -> 'alza'|'baja'|None"""
     if ventana is None or umbral is None:
         params = cargar_params()
         if ventana is None:
@@ -220,10 +134,7 @@ def _impulso(cierres, atr_actual, ventana=None, umbral=None):
 
 def _aceleracion(aperturas, cierres, atr_actual, ventana=None,
                   umbral_atr=None, umbral_ritmo=None):
-    """'aceleracion_alza'/'aceleracion_baja': la ULTIMA vela sola se movio
-    (cierre-apertura) mas de 'umbral_atr'xATR Y mas de 'umbral_ritmo' veces
-    el ritmo (movimiento absoluto medio cierre-apertura) de las 'ventana'
-    velas previas a ella."""
+    """_aceleracion(aperturas, cierres, atr_actual, ventana=None, umbral_atr=None, umbral_ritmo=None) -> 'alza'|'baja'|None"""
     if ventana is None or umbral_atr is None or umbral_ritmo is None:
         params = cargar_params()
         if ventana is None:
@@ -247,8 +158,7 @@ def _aceleracion(aperturas, cierres, atr_actual, ventana=None,
 
 
 def _ruptura(altos, bajos, cierres, ventana=None):
-    """'ruptura_alza'/'ruptura_baja': el CIERRE de la ultima vela rompe el
-    maximo/minimo de las 'ventana' velas ANTERIORES (sin contar la propia)."""
+    """_ruptura(altos, bajos, cierres, ventana=None) -> 'alza'|'baja'|None"""
     if ventana is None:
         ventana = cargar_params()["ventana_ruptura"]
     if len(cierres) <= ventana:
@@ -263,11 +173,7 @@ def _ruptura(altos, bajos, cierres, ventana=None):
 
 
 def _rechazo(altos, bajos, cierres, ventana=None):
-    """'rechazo_max'/'rechazo_min': la MECHA de la ultima vela pincha un
-    nuevo extremo de las 'ventana' velas anteriores, pero el CIERRE se
-    queda dentro de ese rango previo (mecha de rechazo, ruptura no
-    confirmada). Devuelve una lista ("max"/"min", pueden darse ambas a la
-    vez en una vela muy volatil)."""
+    """_rechazo(altos, bajos, cierres, ventana=None) -> list['max'|'min']"""
     if ventana is None:
         ventana = cargar_params()["ventana_ruptura"]
     if len(cierres) <= ventana:
@@ -283,16 +189,7 @@ def _rechazo(altos, bajos, cierres, ventana=None):
 
 
 def _divergencias(velas, altos, bajos, rsi_serie, k):
-    """'div_bajista'/'div_alcista': el ultimo swing de PRECIO (via
-    indicadores.extremos_locales, mismo detector que usa
-    niveles.py) marca un nuevo extremo que el RSI NO confirma
-    (maximo de precio mas alto con RSI mas bajo, o minimo de precio mas
-    bajo con RSI mas alto) frente al swing anterior del mismo lado.
-
-    Solo se evalua si el swing mas reciente que puede confirmar
-    extremos_locales() CAE justo en la ultima vela (indice len(velas)-1-k,
-    el mas nuevo posible con k vecinos a la derecha ya cerrados) - si no,
-    ya se habria avisado (o descartado) en una vuelta anterior."""
+    """_divergencias(velas, altos, bajos, rsi_serie, k) -> list['bajista'|'alcista']"""
     idx_altos, idx_bajos = indicadores.extremos_locales(velas, k)
     ultimo_posible = len(velas) - 1 - k
     eventos = []
@@ -313,8 +210,7 @@ def _divergencias(velas, altos, bajos, rsi_serie, k):
 
 
 def _rsi_giro(rsi_serie, sobrecompra=None, sobreventa=None):
-    """'rsi_sobrecompra'/'rsi_sobreventa': RSI en zona extrema Y ya girando
-    de vuelta hacia el centro (vela a vela, no solo tocando el umbral)."""
+    """_rsi_giro(rsi_serie, sobrecompra=None, sobreventa=None) -> 'sobrecompra'|'sobreventa'|None"""
     if sobrecompra is None or sobreventa is None:
         params = cargar_params()
         if sobrecompra is None:
@@ -332,30 +228,7 @@ def _rsi_giro(rsi_serie, sobrecompra=None, sobreventa=None):
 
 
 def detectar(velas, k, ventana_ruptura=None, niveles_vigentes=None, tolerancia_nivel=None):
-    """Evalua las 12 señales sobre la ULTIMA vela de 'velas' (asumida
-    cerrada). 'k' es el mismo parametro de extremos_locales que ya se usa
-    para detectar niveles (ver niveles.py) - se reutiliza aqui para
-    los swings de divergencia, sin introducir un segundo criterio de
-    "swing" en el proyecto.
-
-    Devuelve una lista de nombres de señales activas (puede estar vacia, y
-    puede tener varias a la vez - no son excluyentes entre si). ATR y RSI
-    usan los periodos por defecto de indicadores.py (14) - con poca
-    historia todavia, ambos devuelven None y las señales que dependen de
-    ellos simplemente no se activan.
-
-    Si 'velas' trae mas historico del que hace falta, se recorta a
-    VENTANA_MAXIMA (ver comentario junto a la constante) - el caller puede
-    pasar tranquilamente la lista completa sin preocuparse de acotarla el
-    mismo en cada llamada.
-
-    'niveles_vigentes' (lista de (precio, rol_efectivo) - ver
-    herramientas/backtest_senales.py._niveles_vigentes) y 'tolerancia_nivel',
-    si se dan, activan el filtro del Grupo A (ver NIVEL_UTIL_GRUPO_A): esas
-    7 señales solo se devuelven (renombradas via NOMBRE_REFINADO) si hay
-    cerca un nivel del tipo que de verdad les ayuda - si no, se descartan.
-    El resto de señales no se ven afectadas. Sin 'niveles_vigentes' (caso
-    por defecto), el comportamiento es el de siempre, sin filtrar nada."""
+    """detectar(velas, k, ventana_ruptura=None, niveles_vigentes: list[(precio, rol)]|None = None, tolerancia_nivel: float|None = None) -> list[str]"""
     if ventana_ruptura is None:
         ventana_ruptura = cargar_params()["ventana_ruptura"]
     limite = max(cargar_params()["ventana_maxima"], ventana_ruptura + 50, 4 * k + 50)
