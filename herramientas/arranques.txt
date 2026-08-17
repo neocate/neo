@@ -1,16 +1,17 @@
-https://manus.im/share/nwZvFYs4qM6ohWB6utQCRs
+
+
+Linux (bash, servidor):
 
 kill -INT
 ps -ef | grep herramientas | grep -v grep
 
 
-kill -INT 22989
+
 nohup venv/bin/python -u herramientas/grabador_libro.py btc,eth,icp >> herramientas/grabador_libro/_salida.log 2>&1 &
-
-
 nohup venv/bin/python -u herramientas/descargar_bit.py --velas icp --cada 60 >> herramientas/velas/icp.log 2>&1 &
 nohup venv/bin/python -u herramientas/descargar_bit.py --velas eth --cada 60 >> herramientas/velas/eth.log 2>&1 &
 nohup venv/bin/python -u herramientas/descargar_bit.py --velas btc --cada 60 >> herramientas/velas/btc.log 2>&1 &
+
 
 
 
@@ -23,6 +24,32 @@ nohup venv/bin/python -u herramientas/niveles.py --actualizar eth 1h --k 3 --tol
 nohup venv/bin/python -u herramientas/niveles.py --actualizar icp 15m --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas/niveles/icp_15m.log 2>&1 &
 nohup venv/bin/python -u herramientas/niveles.py --actualizar btc 15m --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas/niveles/btc_15m.log 2>&1 &
 nohup venv/bin/python -u herramientas/niveles.py --actualizar eth 15m --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas/niveles/eth_15m.log 2>&1 &
+
+
+
+Windows (PowerShell, local):
+
+# Ver procesos python de herramientas/ corriendo (PID + linea de comando)
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -match 'herramientas' } | Select-Object ProcessId, CommandLine
+
+# Parar uno por PID (TerminateProcess: cierre en frio, no dispara el "except KeyboardInterrupt"
+# del script como si fuera Ctrl+C; los locks huerfanos se limpian solos al reiniciar la moneda)
+Stop-Process -Id <PID>
+
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\grabador_libro.py btc,eth,icp >> herramientas\grabador_libro\_salida.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\descargar_bit.py --velas icp --cada 60 >> herramientas\velas\icp.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\descargar_bit.py --velas eth --cada 60 >> herramientas\velas\eth.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\descargar_bit.py --velas btc --cada 60 >> herramientas\velas\btc.log 2>&1' -WindowStyle Hidden
+
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar icp 4h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\icp_4h.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar btc 4h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\btc_4h.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar eth 4h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\eth_4h.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar icp 1h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\icp_1h.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar btc 1h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\btc_1h.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar eth 1h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\eth_1h.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar icp 15m --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\icp_15m.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar btc 15m --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\btc_15m.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar eth 15m --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\eth_15m.log 2>&1' -WindowStyle Hidden
 
 
 
