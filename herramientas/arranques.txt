@@ -54,50 +54,21 @@ Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u her
 
 
 cd \\NAS_OFICINA\homes\Fran\neo-verificado\historicos
-python descargar_bin.py eth 1m
-python descargar_bin.py eth 3m
-python descargar_bin.py eth 5m
-python descargar_bin.py eth 15m
-python descargar_bin.py eth 30m
-python descargar_bin.py eth 1h
-python descargar_bin.py eth 4h
-python descargar_bin.py eth 1d
-python descargar_bin.py btc 1m
-python descargar_bin.py btc 3m
-python descargar_bin.py btc 5m
-python descargar_bin.py btc 15m
-python descargar_bin.py btc 30m
-python descargar_bin.py btc 1h
-python descargar_bin.py btc 4h
-python descargar_bin.py btc 1d
+python descargar_bin.py eth
+python descargar_bin.py btc
 
 
 
 cd \\NAS_OFICINA\homes\Fran\neo-verificado\herramientas
-python descargar_bit.py --velas icp 1m
-python descargar_bit.py --velas icp 3m
-python descargar_bit.py --velas icp 5m
-python descargar_bit.py --velas icp 15m
-python descargar_bit.py --velas icp 1h
-python descargar_bit.py --velas icp 4h
-python descargar_bit.py --velas icp 1d
-python descargar_bit.py --velas eth 1m
-python descargar_bit.py --velas eth 3m
-python descargar_bit.py --velas eth 5m
-python descargar_bit.py --velas eth 15m
-python descargar_bit.py --velas eth 1h
-python descargar_bit.py --velas eth 4h
-python descargar_bit.py --velas eth 1d
-python descargar_bit.py --velas btc 1m
-python descargar_bit.py --velas btc 3m
-python descargar_bit.py --velas btc 5m
-python descargar_bit.py --velas btc 15m
-python descargar_bit.py --velas btc 1h
-python descargar_bit.py --velas btc 4h
-python descargar_bit.py --velas btc 1d
+python descargar_bit.py --velas icp
+python descargar_bit.py --velas eth
+
+python descargar_bit.py --velas eth
+python descargar_bit.py --validar-todo eth
+python descargar_bit.py --velas btc
 
 
-
+python verificacion/verificar_indicadores_historico.py btc 1h,4h
 
 
 

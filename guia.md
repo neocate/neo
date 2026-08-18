@@ -118,11 +118,163 @@ python descargar_bit.py --estado btc 5m
 - ✓ Validaciones robustas
 - ✓ Listos para uso
 
+### 8. NUEVA FUNCIONALIDAD: DETECCIÓN DE NIVELES DE SOPORTE/RESISTENCIA
+
+**Objetivo:** Sistema de niveles en vivo para operaciones, con barrido inicial offline y actualizaciones incrementales.
+
+**Archivos creados:**
+- `herramientas/niveles.py` - Detector de niveles (prod)
+- `test/auditar_niveles.py` - Validador de JSONs
+- `test/prueba_niveles.py` - Análisis offline
+- `test/README_EJEMPLOS.md` - Guía de uso completa
+- `barrido_inicial_eth.bat` / `.sh` - Scripts automatizados
+
+**Funcionalidades:**
+- ✓ Detección de extremos locales (soportes y resistencias)
+- ✓ Ponderación por volumen (toques más fuertes = más peso)
+- ✓ Detección de gaps (saltos sin tocar nivel = muy fuerte)
+- ✓ Evaluación de rupturas confirmadas (múltiples velas)
+- ✓ Monitoreo en vivo con actualizaciones incrementales (<1s/ciclo)
+- ✓ Configuración en caliente desde JSON (sin reiniciar)
+- ✓ Auditoría automática de integridad
+- ✓ Historial de transiciones (nivel_nuevo, toque, rotura, flip, recuperado)
+- ✓ Output con precio actual + resistencia/soporte más cercanos
+
+**Flujo de uso:**
+
+```bash
+# 1. Barrido inicial (una sola vez)
+python herramientas/niveles.py eth 4h --k 3 --tolerancia-atr 0.25 --toques-min 3
+
+# 2. Auditar integridad
+python test/auditar_niveles.py eth 4h
+
+# 3. Modo vivo (actualizaciones cada 5 min)
+python herramientas/niveles.py --actualizar eth 4h --k 3 --tolerancia-atr 0.25 --toques-min 3 --cada 300
+```
+
+**Output en vivo:**
+```
+[OK] ETH 4H: 487 niveles (1 cambios)
+Precio: 1913.6000
+Resistencia: 1949.5000 (+1.88%)
+Soporte: 1908.0000 (-0.29%)
+```
+
+**Parámetros configurables:**
+- `k`: ventana de extremos (3-5 recomendado)
+- `tolerancia_atr`: multiplicador ATR (0.2-0.3 normal, 0.5+ agresivo)
+- `toques_min`: confirmación de nivel (3-4 recomendado)
+- `confirmacion_velas`: velas para confirmar rotura (2-3 normal)
+- `gap_multiplier`: peso de gaps vs toques normales (1.5-2.0)
+
 ---
 
-## COMMITS PENDIENTES
+## ARQUITECTURA DE GUARDADO: CSV vs JSON
 
-1. grabador_libro.py - Versión optimizada
-2. descargar_bit.py - Nuevas funciones y comandos
-3. guia.md - Este registro
+**Criterio de elección según tipo de dato:**
+
+### JSON - Para datos jerárquicos/actualizables
+```
+✓ Niveles detectados (herramientas/niveles/[COIN]/listado_[TF].json)
+  - Estructura compleja: params, atr_ref, tolerancia, niveles[]
+  - Se actualiza estado (vivo→roto) sin reescribir todo
+  - Cambios de parámetros se aplican fácil
+  - Velocidad lectura: ~100ms (4.7M velas)
+
+✓ Configuración global (json/niveles.json)
+  - Se carga cada ciclo sin reiniciar
+  - Cambios aplican en siguiente ciclo
+  - Estructura jerárquica (parametros, atr, logica, historial)
+```
+
+### CSV - Para series temporales/append-only
+```
+✓ Histórico de velas (herramientas/velas/[COIN]/[TF]_bitget.csv)
+  - Datos secuenciales, nunca se actualizan
+  - 4.7M de velas → CSV (30% menor que JSON)
+  - Lectura de últimas N velas: ~10ms vs 500ms JSON
+  - Append vela nueva: 1 línea vs reescribir todo
+
+✓ Historial de cambios (herramientas/niveles/[COIN]/historial_[TF].csv)
+  - Eventos secuenciales (nivel_nuevo, toque, rotura, flip, recuperado)
+  - Append-only (nunca se modifica)
+  - Fácil análisis con pandas/Excel
+```
+
+### .txt - Para configuración de usuario
+```
+✓ arranques.txt
+  - Comandos para iniciar en vivo (Windows/Linux)
+  - No se modifica por código, solo por usuario
+  - Fácil copiar entre equipos
+```
+
+**Tabla de referencia:**
+| Dato | Formato | Razón | Actualización |
+|------|---------|-------|---------------|
+| Velas históricas | CSV | 30% menor, rápida lectura parcial | Nunca (append-only) |
+| Niveles detectados | JSON | Estructura compleja, actualizar estado | Cada ciclo (estado) |
+| Historial eventos | CSV | Secuencial append-only | Append cada evento |
+| Config global | JSON | Jerárquica, se carga en vivo | Manual (usuario) |
+| Scripts arranque | .txt | Legible, sin parsing | Manual (usuario) |
+
+---
+
+## ESTRUCTURA DE CARPETAS - PRODUCCIÓN vs TEST
+
+```
+neo/
+├── herramientas/
+│   ├── niveles.py                    ← PRODUCCIÓN
+│   ├── niveles/                      ← Datos en vivo
+│   │   ├── ETH/
+│   │   │   ├── listado_1d.json       (JSON: estructura + estado)
+│   │   │   ├── historial_1d.csv      (CSV: eventos)
+│   │   │   └── extremos_1d.json      (auxiliar)
+│   │   └── BTC/
+│   ├── velas/
+│   │   ├── ETH/
+│   │   │   ├── 1m_bitget.csv         (CSV: histórico)
+│   │   │   ├── 4h_bitget.csv
+│   │   │   └── 1d_bitget.csv
+│   │   └── BTC/
+│   └── descargar_bit.py
+│
+├── test/                             ← TESTING
+│   ├── niveles/                      ← Datos de prueba
+│   │   └── ETH/
+│   │       └── listado_*.json
+│   ├── auditar_niveles.py
+│   ├── prueba_niveles.py
+│   └── README_EJEMPLOS.md
+│
+├── json/
+│   └── niveles.json                  (JSON: configuración global)
+│
+├── guia.md                           ← Este archivo
+└── arranques.txt                     (txt: comandos inicio)
+```
+
+**Para deploy en otro equipo:**
+1. ✓ Todo el código (*.py, *.sh, *.bat, *.md, *.txt) VIAJA
+2. ✅ Estructura de carpetas SE CREA automáticamente (mkdir en scripts)
+3. ❌ No copiar: historicos/, velas/, niveles/ (datos específicos)
+4. ⚠️ Actualizar: json/niveles.json, arranques.txt (config local)
+5. 📥 Descargar: velas con `python descargar_bit.py --velas eth 4h`
+6. 🚀 Barrido inicial: `barrido_inicial_eth.bat` o `.sh`
+
+---
+
+## COMMITS REALIZADOS
+
+1. ✓ grabador_libro.py - Versión optimizada
+2. ✓ descargar_bit.py - Nuevas funciones y comandos
+3. ✓ niveles.py - Sistema de detección de niveles (NUEVO)
+4. ✓ auditar_niveles.py - Validador (NUEVO)
+5. ✓ prueba_niveles.py - Análisis offline (NUEVO)
+6. ✓ barrido_inicial_eth.bat/.sh - Automatización (NUEVO)
+7. ✓ test/README_EJEMPLOS.md - Documentación completa (NUEVO)
+8. ✓ json/niveles.json - Configuración (NUEVO)
+9. ✓ guia.md - Este registro (ACTUALIZADO)
 

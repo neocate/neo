@@ -1,0 +1,21 @@
+{
+  "parametros": {
+    "k": 3,
+    "tolerancia_atr": 0.25,
+    "toques_min": 3,
+    "confirmacion_velas": 2,
+    "gap_multiplier": 1.5
+  },
+  "atr": {
+    "periodo": 14
+  },
+  "logica": {
+    "ponderar_volumen": true,
+    "detectar_gaps": true,
+    "usar_open_ruptura": true
+  },
+  "historial": {
+    "registrar_transiciones_positivas": true,
+    "registrar_solo_rotura": false
+  }
+}
