@@ -237,7 +237,7 @@ def _guardar_config(params):
 def _crear_estado(cvd_previo):
     return {
         "cvd": cvd_previo if cvd_previo is not None else 0.0,
-        "libro": None, "libro_ts": None,
+        "libro": None, "libro_ts": None, "libro_lock": asyncio.Lock(),
         "funding": None, "oi": None, "ticker_ts": None,
         "ls_ratio": None,
         "ultimo_trade_ts": None,
@@ -249,6 +249,7 @@ def _crear_estado(cvd_previo):
         "recuperando": False,
         "trades_fuera_banda": 0,
         "forzar_resub_libro": False,
+        "spread_invalido_count": 0,
     }
 
 
@@ -299,8 +300,8 @@ def _toca_libro_crudo(estado, libro_crudo_cada):
 
 
 UMBRAL_HUECO_SEG = 15.0
-TOPE_LLAMADAS_RECUPERACION = 10
-TOPE_TRADES_RECUPERACION = 5000
+TOPE_LLAMADAS_RECUPERACION = 20
+TOPE_TRADES_RECUPERACION = 50000
 
 
 def _ruta_huecos(coin):
@@ -397,16 +398,28 @@ async def _watch_book(exchange, coin, simbolo, estado, rest_lock):
                 continue
             ob = await exchange.watch_order_book(simbolo)
             bids, asks = ob["bids"], ob["asks"]
-            if bids and asks and bids[0][0] > asks[0][0]:
-                print(f"  (aviso) libro {coin}: cruzado (bid {bids[0][0]} > ask {asks[0][0]}), "
-                      f"forzando resuscripcion...")
-                await exchange.un_watch_order_book(simbolo)
-                continue
+            if bids and asks:
+                bid_top = bids[0][0]
+                ask_top = asks[0][0]
+                if bid_top > ask_top:
+                    print(f"  (aviso) libro {coin}: cruzado (bid {bid_top} > ask {ask_top}), "
+                          f"forzando resuscripcion...")
+                    estado["spread_invalido_count"] += 1
+                    await exchange.un_watch_order_book(simbolo)
+                    continue
+                elif ask_top < bid_top:
+                    print(f"  (CRITICO) libro {coin}: spread invertido (ask {ask_top} < bid {bid_top}), "
+                          f"RECHAZANDO update...")
+                    estado["spread_invalido_count"] += 1
+                    await exchange.un_watch_order_book(simbolo)
+                    continue
+                estado["spread_invalido_count"] = 0
             ahora = time.monotonic()
             if estado["libro_ts"] is not None and (ahora - estado["libro_ts"]) > UMBRAL_HUECO_SEG:
                 await _recuperar_hueco(coin, simbolo, estado, rest_lock)
-            estado["libro"] = ob
-            estado["libro_ts"] = ahora
+            async with estado["libro_lock"]:
+                estado["libro"] = ob
+                estado["libro_ts"] = ahora
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -654,15 +667,28 @@ def _procesar_comandos(exchange, coins_activas, params, simbolos, estados, tarea
 def _fila(coin, estado, params):
     """_fila(coin, estado, params) -> dict, una fila del CSV"""
     ahora_mono = time.monotonic()
-    umbral = max(2 * params["cada"], UMBRAL_HUECO_SEG)
-    fresco_libro = estado["libro_ts"] is not None and (ahora_mono - estado["libro_ts"]) <= umbral
-    fresco_ticker = estado["ticker_ts"] is not None and (ahora_mono - estado["ticker_ts"]) <= umbral
+    umbral_frescura = max(2 * params["cada"], UMBRAL_HUECO_SEG * 4)
+    fresco_libro = estado["libro_ts"] is not None and (ahora_mono - estado["libro_ts"]) <= umbral_frescura
+    fresco_ticker = estado["ticker_ts"] is not None and (ahora_mono - estado["ticker_ts"]) <= umbral_frescura
 
-    libro = estado["libro"] if fresco_libro else None
-    bids = libro["bids"] if libro else None
-    asks = libro["asks"] if libro else None
-    bid = bids[0][0] if bids else None
-    ask = asks[0][0] if asks else None
+    libro = None
+    bids = None
+    asks = None
+    bid = None
+    ask = None
+
+    if fresco_libro:
+        try:
+            if estado.get("libro"):
+                libro = estado["libro"]
+                bids = libro.get("bids")
+                asks = libro.get("asks")
+                if bids:
+                    bid = bids[0][0]
+                if asks:
+                    ask = asks[0][0]
+        except (IndexError, KeyError, TypeError):
+            pass
 
     n_trades = estado["n_trades_fila"]
     vol_buy = estado["vol_buy_fila"]

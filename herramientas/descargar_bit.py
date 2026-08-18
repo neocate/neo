@@ -2,6 +2,9 @@
 #   python descargar_bit.py <coin> <timeframe> [desde]
 #   python descargar_bit.py --feed [coin[,coin2,...]] [--tfs 1m,5m,15m,30m,1h,4h,1d] [--dias-objetivo 90] [--cada 60]
 #   python descargar_bit.py --velas <coin[,coin2,...]> [tf] [--cada segundos]
+#   python descargar_bit.py --validar <coin> <timeframe>
+#   python descargar_bit.py --validar-todo <coin>
+#   python descargar_bit.py --estado <coin> <timeframe>
 #
 # Ejemplos:
 #   python descargar_bit.py btc 5m 1
@@ -10,6 +13,8 @@
 #   python descargar_bit.py --velas btc
 #   python descargar_bit.py --velas btc 1h
 #   python descargar_bit.py --velas btc,eth --cada 60
+#   python descargar_bit.py --validar eth 1h
+#   python descargar_bit.py --estado eth 1h
 
 import csv
 import math
@@ -22,7 +27,6 @@ from datetime import datetime, timezone
 import ccxt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from mercado.senales import VENTANA_MAXIMA
 from mercado import datos
 
 DIR_LIBRO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libro")
@@ -33,6 +37,8 @@ DIAS_OBJETIVO = 90.0
 TIMEFRAMES_FEED = ["1m","3m","5m", "15m", "30m", "1h", "4h", "1d"]
 
 TIMEFRAMES_NIVELES = ["1m", "3m", "5m", "15m", "1h", "4h", "1d"]
+
+TOLERANCIA_GAP_PCT = 0.05
 
 
 def _simbolo(coin):
@@ -124,7 +130,7 @@ def _segundos_tf(timeframe):
 def _velas_objetivo(timeframe, dias=DIAS_OBJETIVO):
     """_velas_objetivo(timeframe, dias=DIAS_OBJETIVO) -> int"""
     por_dias = math.ceil(dias * 86400 / _segundos_tf(timeframe))
-    return max(por_dias, VENTANA_MAXIMA)
+    return por_dias
 
 
 def _recortar_si_hace_falta(ruta, cap, margen=0.10):
@@ -383,8 +389,200 @@ def _feed_velas(coins, tfs, cada):
         print("\nParado por el usuario.")
 
 
+def validar_historico(coin, timeframe):
+    """validar_historico(coin, timeframe) -> (bool, str, list). Valida gaps en CSV local."""
+    ruta = _archivo_velas(coin, timeframe)
+    if not os.path.exists(ruta):
+        return False, f"{ruta} no existe", []
+    
+    try:
+        with open(ruta, 'r', newline='') as f:
+            reader = csv.DictReader(f)
+            velas = list(reader)
+    except Exception as e:
+        return False, f"Error leyendo {ruta}: {e}", []
+    
+    if not velas:
+        return False, "CSV vacío", []
+    
+    tf_ms = _segundos_tf(timeframe) * 1000
+    gaps = []
+    ts_anterior = None
+    
+    for i, v in enumerate(velas):
+        try:
+            ts = int(v['timestamp'])
+        except (KeyError, ValueError):
+            return False, f"Vela {i}: timestamp inválido", gaps
+        
+        if i == 0:
+            ts_anterior = ts
+            continue
+        
+        diferencia = ts - ts_anterior
+        if abs(diferencia - tf_ms) > (tf_ms * TOLERANCIA_GAP_PCT):
+            gap_velas = round(diferencia / tf_ms - 1)
+            gaps.append({
+                'vela': i,
+                'timestamp': ts,
+                'ts_anterior': ts_anterior,
+                'diferencia_ms': diferencia,
+                'esperado_ms': tf_ms,
+                'velas_faltantes': gap_velas
+            })
+        
+        ts_anterior = ts
+    
+    if gaps:
+        msg = f"{len(gaps)} gap(s) encontrado(s) en {len(velas)} velas"
+        return False, msg, gaps
+    
+    fecha_primera = datetime.fromtimestamp(int(velas[0]['timestamp'])/1000, timezone.utc)
+    fecha_ultima = datetime.fromtimestamp(int(velas[-1]['timestamp'])/1000, timezone.utc)
+    msg = f"OK: {len(velas)} velas sin gaps ({fecha_primera:%Y-%m-%d} a {fecha_ultima:%Y-%m-%d})"
+    return True, msg, []
+
+
+def estado_vela_actual(coin, timeframe):
+    """estado_vela_actual(coin, timeframe) -> dict. Estado EN VIVO de la vela actual."""
+    cliente = ccxt.bitget({'enableRateLimit': True})
+    simbolo = _simbolo(coin)
+    
+    try:
+        lote = cliente.fetch_ohlcv(simbolo, timeframe, limit=1)
+    except Exception as e:
+        return {"error": str(e)}
+    
+    if not lote:
+        return {"error": "Sin datos en Bitget"}
+    
+    ts_ms, o, h, l, c, vol = lote[0]
+    tf_ms = cliente.parse_timeframe(timeframe) * 1000
+    ahora_ms = cliente.milliseconds()
+    
+    tiempo_desde_inicio = ahora_ms - ts_ms
+    tiempo_falta_cierre = tf_ms - tiempo_desde_inicio
+    pct_completa = (tiempo_desde_inicio / tf_ms) * 100
+    
+    return {
+        "simbolo": simbolo,
+        "timeframe": timeframe,
+        "timestamp_inicio_ms": ts_ms,
+        "fecha_utc": datetime.fromtimestamp(ts_ms/1000, timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        "open": o,
+        "high": h,
+        "low": l,
+        "close": c,
+        "volumen": vol,
+        "timeframe_ms": tf_ms,
+        "tiempo_transcurrido_ms": tiempo_desde_inicio,
+        "tiempo_falta_cierre_ms": tiempo_falta_cierre,
+        "tiempo_falta_cierre_seg": round(tiempo_falta_cierre / 1000),
+        "pct_completitud": round(pct_completa, 2),
+        "estado": "EN CURSO" if tiempo_falta_cierre > 0 else "CERRADA",
+        "ahora_ms": ahora_ms
+    }
+
+
+def validar_todo(coin, tfs=None):
+    """validar_todo(coin, tfs=None) -> dict. Valida todos los TF de una moneda."""
+    if tfs is None:
+        tfs = TIMEFRAMES_NIVELES
+    
+    resultados = {
+        "coin": coin,
+        "total_tfs": len(tfs),
+        "ok": 0,
+        "con_gaps": 0,
+        "sin_archivo": 0,
+        "detalles": []
+    }
+    
+    for tf in tfs:
+        ok, msg, gaps = validar_historico(coin, tf)
+        
+        if "no existe" in msg:
+            estado = "SIN ARCHIVO"
+            resultados["sin_archivo"] += 1
+        elif ok:
+            estado = "✓ OK"
+            resultados["ok"] += 1
+        else:
+            estado = "✗ GAPS"
+            resultados["con_gaps"] += 1
+        
+        resultados["detalles"].append({
+            "timeframe": tf,
+            "estado": estado,
+            "mensaje": msg,
+            "gaps_count": len(gaps)
+        })
+    
+    return resultados
+
+
 def main():
     args = sys.argv[1:]
+    
+    if args and args[0] == "--validar-todo":
+        args = args[1:]
+        if not args:
+            print("Uso: python descargar_bit.py --validar-todo <coin>")
+            return
+        coin = args[0]
+        resultados = validar_todo(coin)
+        
+        print(f"\n{coin}: Validación de todos los timeframes")
+        print(f"{'='*60}")
+        print(f"Total: {resultados['total_tfs']} timeframes | OK: {resultados['ok']} | GAPS: {resultados['con_gaps']} | SIN ARCHIVO: {resultados['sin_archivo']}\n")
+        
+        for det in resultados["detalles"]:
+            print(f"  {det['timeframe']:>4s}: {det['estado']:>10s}  {det['mensaje']}")
+            if det['gaps_count'] > 0:
+                print(f"         └─ {det['gaps_count']} gap(s)")
+        
+        print(f"{'='*60}")
+        if resultados["con_gaps"] == 0 and resultados["sin_archivo"] == 0:
+            print(f"✓ {coin}: TODOS LOS DATOS VÁLIDOS")
+        elif resultados["con_gaps"] > 0:
+            print(f"✗ {coin}: {resultados['con_gaps']} timeframe(s) con gaps encontrados")
+        return
+    
+    if args and args[0] == "--validar":
+        args = args[1:]
+        if len(args) < 2:
+            print("Uso: python descargar_bit.py --validar <coin> <timeframe>")
+            return
+        coin, timeframe = args[0], args[1]
+        ok, msg, gaps = validar_historico(coin, timeframe)
+        print(f"{coin} {timeframe}: {msg}")
+        if gaps:
+            print(f"\nGaps encontrados:")
+            for gap in gaps[:10]:
+                print(f"  Vela {gap['vela']}: falta {gap['velas_faltantes']} vela(s) "
+                      f"({gap['diferencia_ms']/1000:.0f}s en lugar de {gap['esperado_ms']/1000:.0f}s)")
+            if len(gaps) > 10:
+                print(f"  ... y {len(gaps)-10} más")
+        return
+    
+    if args and args[0] == "--estado":
+        args = args[1:]
+        if len(args) < 2:
+            print("Uso: python descargar_bit.py --estado <coin> <timeframe>")
+            return
+        coin, timeframe = args[0], args[1]
+        info = estado_vela_actual(coin, timeframe)
+        if "error" in info:
+            print(f"{coin} {timeframe}: ERROR - {info['error']}")
+            return
+        print(f"{coin} {timeframe}:")
+        print(f"  Inicio: {info['fecha_utc']} (UTC)")
+        print(f"  Estado: {info['estado']}")
+        print(f"  Completitud: {info['pct_completitud']}%")
+        print(f"  Falta para cierre: {info['tiempo_falta_cierre_seg']}s")
+        print(f"  OHLCV: O={info['open']:.2f} H={info['high']:.2f} L={info['low']:.2f} C={info['close']:.2f} V={info['volumen']:.0f}")
+        return
+    
     if args and args[0] == "--velas":
         args = args[1:]
         if not args:
@@ -447,6 +645,15 @@ def main():
         print("                           [--dias-objetivo 90] [--cada 60]")
         print("\nHistorico permanente para niveles.py (ver cabecera):")
         print("  python descargar_bit.py --velas <coin[,coin2,...]> [tf] [--cada segundos]")
+        print("\nValidar integridad de historico (detecta gaps):")
+        print("  python descargar_bit.py --validar <coin> <timeframe>")
+        print("  Ejemplo: python descargar_bit.py --validar eth 1h")
+        print("\nValidar TODOS los timeframes de una moneda:")
+        print("  python descargar_bit.py --validar-todo <coin>")
+        print("  Ejemplo: python descargar_bit.py --validar-todo eth")
+        print("\nEstado EN VIVO de vela actual (tiempo real):")
+        print("  python descargar_bit.py --estado <coin> <timeframe>")
+        print("  Ejemplo: python descargar_bit.py --estado eth 1h")
         return
     coin = sys.argv[1]
     timeframe = sys.argv[2]
