@@ -1,81 +1,69 @@
-# ---------------------------------------------------------------
-# niveles_soporte.py - Detecta suelos/techos (soporte/resistencia) de UN TF
-# a partir del historico ya descargado, para poder compararlos a ojo contra
-# un grafico real (TradingView, Binance...) antes de fiarse de ellos.
+# Detecta soportes y resistencias con backtest + live multi-timeframe.
 #
-# Deliberadamente SIN valores por defecto en k/tolerancia/toques-min - la
-# idea es que el usuario los pase explicito cada vez y compare resultados,
-# en vez de heredar sin darse cuenta los que ya se habian validado en el
-# proyecto viejo (bit/escalera.py: tolerancia 0.25xATR, 6 toques). Los datos
-# tienen que encontrar el optimo sin ese sesgo de partida.
+# BACKTEST (histórico):
+#   python niveles_soporte.py eth 5m --cada1m --loop 300
+#   Alimenta velas 1m históricas → agrupa a 5m → calcula niveles
+#   Output: snapshots_eth_5m_cada1m.csv (vela-por-vela)
 #
-# Criterio (mismo que bit/escalera.py._proximo_nivel, pero aqui se listan
-# TODOS los niveles confirmados del rango pedido, no solo el siguiente por
-# delante del precio):
-#   1. Candidatos: extremos_locales() (swing highs/lows, k velas a cada lado)
-#   2. Tolerancia en ATR (no en % fijo - un % fijo degenera en un filtro que
-#      dice siempre que si o siempre que no, ver anotaciones de bit). Se usa
-#      la MEDIANA del ATR del rango analizado como referencia unica, no un
-#      ATR que cambia punto a punto - para que todos los niveles se midan
-#      con la misma vara.
-#   3. Toques minimos: un extremo tocado una sola vez no es soporte real.
-#      Se agrupan velas consecutivas dentro de la tolerancia como UN solo
-#      toque (si no, una visita larga infla el conteo).
-#   4. Niveles que caen dentro de la tolerancia entre si se fusionan en uno,
-#      sin importar tipo (techo/suelo) - una zona de rango actua como
-#      resistencia y soporte alternada, y extremos_locales suele devolver
-#      varios swing points casi pegados en la misma zona. Se agrupan en
-#      clusters completos (ancla = precio del primer nivel del cluster, no
-#      el ultimo agregado) para que una cadena de niveles muy pegados entre
-#      si no derive mas alla de la tolerancia real.
-#   5. Estado (vivo/roto/flip) despues del ultimo toque: un nivel se marca
-#      "roto" cuando hay --confirmacion-velas cierres CONSECUTIVOS del otro
-#      lado del nivel +/- tolerancia (un solo cierre puede ser ruido). Si
-#      despues de romperse el precio vuelve a testear la zona desde el otro
-#      lado, se marca "flip" (cambio de rol: techo roto actuando de suelo,
-#      o viceversa). Valor sugerido por ahora: 2 velas de confirmacion -
-#      no calibrado contra datos como k/tolerancia/toques-min, ajustar si
-#      se ve mucho falso positivo/negativo.
-#
-# --tf-macro <tf>: ademas del TF principal (mas fino, para entradas/salidas),
-# analiza un TF mas alto con los MISMOS k/tolerancia-atr/toques-min y usa su
-# techo y suelo vigentes mas cercanos al precio como TOPES del rango. Los
-# niveles del TF principal que caen fuera de ese rango macro se dejan
-# afuera del listado "ajustado" (el listado completo de mas arriba no se
-# toca, es solo una vista adicional).
-#
-# Uso:
-#   python herramientas/niveles_soporte.py <coin> <tf> --k 3 --tolerancia-atr 0.25 --toques-min 3 [--desde-dias 90] [--tf-macro 4h]
-#
-# Ejemplos:
-#   python herramientas/niveles_soporte.py btc 4h --k 2 --tolerancia-atr 0.25 --toques-min 3
-#   python herramientas/niveles_soporte.py btc 15m --k 5 --tolerancia-atr 0.15 --toques-min 4 --desde-dias 30
-#   python herramientas/niveles_soporte.py eth 1h --k 3 --tolerancia-atr 0.25 --toques-min 4 --desde-dias 90 --tf-macro 4h
+# LIVE (tiempo real):
+#   Automático. Cuando se agota histórico, espera nuevas velas.
 # ---------------------------------------------------------------
 
 import csv
 import os
 import sys
+import json
+import time
+import tempfile
+import signal
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mercado import indicadores
 from herramientas.descargar_bit import _archivo as _archivo_bitget
 
-# Bitget, NO Binance (2026-08-07, correccion de Fran): los niveles se
-# vigilan en vivo contra el precio de Bitget (mercado/datos.py, el mismo
-# exchange que opera monitor.py) - calcularlos sobre velas de otro exchange
-# (Binance, via descargar_bin.py) podia marcar "toque" o "roto" con precios
-# que Bitget nunca vio, o al reves. Ver tambien herramientas/descargar_bit.py
-# cabecera: "para contrastar una sesion real usar este script, no
-# descargar_bin.py".
+_debe_terminar = False
+
+def _handler_signals(signum, frame):
+    global _debe_terminar
+    _debe_terminar = True
+    print(f"\n[SIGNAL] Terminando gracefully...", flush=True)
+
+signal.signal(signal.SIGTERM, _handler_signals)
+signal.signal(signal.SIGINT, _handler_signals)
+
+
+def _tf_a_ms(tf):
+    """Convierte timeframe a milisegundos."""
+    if tf.endswith('m'):
+        return int(tf[:-1]) * 60 * 1000
+    elif tf.endswith('h'):
+        return int(tf[:-1]) * 3600 * 1000
+    elif tf.endswith('d'):
+        return int(tf[:-1]) * 86400 * 1000
+    raise ValueError(f"Timeframe inválido: {tf}")
+
+
+def _ms_a_tf(ms):
+    """Convierte milisegundos a timeframe."""
+    if ms % (3600 * 1000) == 0:
+        h = ms // (3600 * 1000)
+        return f"{h}h"
+    elif ms % (60 * 1000) == 0:
+        m = ms // (60 * 1000)
+        return f"{m}m"
+    elif ms % (86400 * 1000) == 0:
+        d = ms // (86400 * 1000)
+        return f"{d}d"
+    return str(ms)
 
 
 def _cargar_velas(coin, tf, desde_dias=None):
     ruta = _archivo_bitget(coin, tf)
     if not os.path.exists(ruta):
         raise FileNotFoundError(
-            f"No hay historico de {coin.upper()} {tf} en herramientas/libro/ - "
+            f"No hay historico de {coin.upper()} {tf} - "
             f"bajalo primero con: python herramientas/descargar_bit.py {coin} {tf}")
 
     corte_ms = None
@@ -85,13 +73,62 @@ def _cargar_velas(coin, tf, desde_dias=None):
     velas = []
     with open(ruta, newline='') as f:
         r = csv.reader(f)
-        next(r)  # cabecera
+        next(r)
         for row in r:
             ts = int(row[0])
             if corte_ms is not None and ts < corte_ms:
                 continue
             velas.append([ts, float(row[2]), float(row[3]), float(row[4]), float(row[5]), float(row[6])])
     return velas, ruta
+
+
+def _agregar_velas(velas_pequeñas, tf_pequeño_ms, tf_grande_ms):
+    """Agrupa velas menores a mayores. Ej: 1m → 5m."""
+    if not velas_pequeñas:
+        return []
+
+    velas_grandes = []
+    vela_actual = None
+
+    for v in velas_pequeñas:
+        ts, open_, high, low, close, volumen = v
+        ts_rounded = (ts // tf_grande_ms) * tf_grande_ms
+
+        if vela_actual is None or vela_actual["ts"] != ts_rounded:
+            if vela_actual is not None:
+                velas_grandes.append([
+                    vela_actual["ts"],
+                    vela_actual["open"],
+                    vela_actual["high"],
+                    vela_actual["low"],
+                    vela_actual["close"],
+                    vela_actual["volumen"]
+                ])
+            vela_actual = {
+                "ts": ts_rounded,
+                "open": open_,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volumen": volumen
+            }
+        else:
+            vela_actual["high"] = max(vela_actual["high"], high)
+            vela_actual["low"] = min(vela_actual["low"], low)
+            vela_actual["close"] = close
+            vela_actual["volumen"] += volumen
+
+    if vela_actual is not None:
+        velas_grandes.append([
+            vela_actual["ts"],
+            vela_actual["open"],
+            vela_actual["high"],
+            vela_actual["low"],
+            vela_actual["close"],
+            vela_actual["volumen"]
+        ])
+
+    return velas_grandes
 
 
 def _mediana(xs):
@@ -103,8 +140,6 @@ def _mediana(xs):
 
 
 def _contar_toques(velas, nivel, tolerancia):
-    """Cuenta toques agrupando velas consecutivas dentro de la tolerancia
-    como UN solo toque. Devuelve (toques, ts_primero, ts_ultimo)."""
     toques = 0
     dentro = False
     primero = ultimo = None
@@ -124,14 +159,8 @@ def _contar_toques(velas, nivel, tolerancia):
 
 
 def _fusionar(niveles, tolerancia):
-    """Niveles que caen dentro de 'tolerancia' de un cluster se fusionan en
-    uno (se queda el de mas toques), sin importar tipo techo/suelo. Cada
-    candidato se compara contra el precio del PRIMER nivel del cluster
-    actual (no el ultimo agregado), para no ir derivando en cadena mas alla
-    de la tolerancia real. 'niveles' ya viene ordenado por precio."""
     if not niveles:
         return []
-
     fusionados = []
     cluster = [niveles[0]]
     ancla = niveles[0]["precio"]
@@ -147,20 +176,11 @@ def _fusionar(niveles, tolerancia):
             cluster = [niv]
             ancla = niv["precio"]
     _cerrar_cluster()
-
     return fusionados
 
 
 def _evaluar_estado(velas, nivel, tipo, tolerancia, ultimo_ts, confirmacion_velas=2):
-    """Estado del nivel despues de su ultimo toque. Devuelve
-    (estado, ts_rotura, ts_flip):
-      - "vivo": nunca hubo confirmacion_velas cierres consecutivos del otro
-        lado de nivel +/- tolerancia.
-      - "roto": se rompio y no hubo retest despues.
-      - "flip": se rompio y despues el precio volvio a testear la zona
-        desde el otro lado (cambio de rol)."""
     posteriores = [v for v in velas if v[0] > ultimo_ts]
-
     consecutivos = 0
     ts_rotura = None
     for v in posteriores:
@@ -184,97 +204,286 @@ def _evaluar_estado(velas, nivel, tipo, tolerancia, ultimo_ts, confirmacion_vela
     return "roto", ts_rotura, None
 
 
-def detectar_niveles(velas, k, tolerancia_atr, toques_min, periodo_atr=14):
+def detectar_niveles(velas, k, tolerancia_atr, toques_min, periodo_atr=14, verbose=False):
+    ts_inicio = time.time()
+
     altos = [v[2] for v in velas]
     bajos = [v[3] for v in velas]
     cierres = [v[4] for v in velas]
+
+    if verbose:
+        print(f"  [1/5] Datos: {len(velas)} velas", flush=True)
+
+    ts = time.time()
     atr_serie = indicadores.atr(altos, bajos, cierres, periodo_atr)
+    if verbose:
+        print(f"  [2/5] ATR: {time.time()-ts:.1f}s", flush=True)
+
     atr_ref = _mediana([a for a in atr_serie if a is not None])
     if atr_ref is None or atr_ref <= 0:
-        raise ValueError("No hay suficiente historia para calcular el ATR de referencia "
-                          f"(se necesitan al menos {periodo_atr + 1} velas).")
+        raise ValueError(f"ATR insuficiente ({periodo_atr + 1} velas mín)")
     tolerancia = tolerancia_atr * atr_ref
 
+    ts = time.time()
     idx_altos, idx_bajos = indicadores.extremos_locales(velas, k)
+    if verbose:
+        print(f"  [3/5] Extremos: {len(idx_altos)}↑ {len(idx_bajos)}↓ ({time.time()-ts:.1f}s)", flush=True)
 
+    ts = time.time()
     candidatos = []
     for idx in idx_altos:
         nivel = altos[idx]
         toques, primero, ultimo = _contar_toques(velas, nivel, tolerancia)
         if toques >= toques_min:
-            candidatos.append(dict(tipo="techo", precio=nivel, toques=toques,
-                                    primero=primero, ultimo=ultimo))
+            candidatos.append(dict(tipo="techo", precio=nivel, toques=toques, primero=primero, ultimo=ultimo))
     for idx in idx_bajos:
         nivel = bajos[idx]
         toques, primero, ultimo = _contar_toques(velas, nivel, tolerancia)
         if toques >= toques_min:
-            candidatos.append(dict(tipo="suelo", precio=nivel, toques=toques,
-                                    primero=primero, ultimo=ultimo))
+            candidatos.append(dict(tipo="suelo", precio=nivel, toques=toques, primero=primero, ultimo=ultimo))
+    if verbose:
+        print(f"  [4/5] Toques: {len(candidatos)} candidatos ({time.time()-ts:.1f}s)", flush=True)
 
+    ts = time.time()
     candidatos.sort(key=lambda d: d["precio"])
-    return _fusionar(candidatos, tolerancia), atr_ref, tolerancia
+    fusionados = _fusionar(candidatos, tolerancia)
+    if verbose:
+        print(f"  [5/5] Fusión: {len(fusionados)} niveles ({time.time()-ts:.1f}s)", flush=True)
+
+    if verbose:
+        print(f"  ✅ TOTAL: {time.time()-ts_inicio:.1f}s", flush=True)
+
+    return fusionados, atr_ref, tolerancia
 
 
-def _rol_efectivo(niv):
-    """Rol actual del nivel: si hizo flip, invierte el tipo original (un
-    techo roto que fue retesteado desde arriba ahora actua de suelo, y
-    viceversa). Niveles 'roto' sin retest no tienen rol vigente."""
-    if niv["estado"] == "flip":
-        return "suelo" if niv["tipo"] == "techo" else "techo"
-    return niv["tipo"]
+def _evaluar_niveles(velas, niveles, confirmacion_velas):
+    precio_actual = velas[-1][4] if velas else None
+    ts_final = velas[-1][0] if velas else None
+
+    for niv in niveles:
+        estado, ts_rotura, ts_flip = _evaluar_estado(
+            velas, niv["precio"], niv["tipo"], 0, niv["ultimo"], confirmacion_velas)
+        niv["estado"] = estado
+        niv["dist_pct"] = (niv["precio"] - precio_actual) / precio_actual * 100 if precio_actual else 0
+        niv["antig_dias"] = (ts_final - niv["ultimo"]) / 86400000 if ts_final else 0
+
+    return precio_actual, ts_final
 
 
 def _fmt_fecha(ts_ms):
     return datetime.fromtimestamp(ts_ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
-def _analizar(coin, tf, k, tolerancia_atr, toques_min, desde_dias, confirmacion_velas):
-    velas, ruta = _cargar_velas(coin, tf, desde_dias)
-    niveles, atr_ref, tolerancia = detectar_niveles(velas, k, tolerancia_atr, toques_min)
-    precio_actual = velas[-1][4] if velas else None
-    ts_final = velas[-1][0] if velas else None
-    for niv in niveles:
-        estado, ts_rotura, ts_flip = _evaluar_estado(
-            velas, niv["precio"], niv["tipo"], tolerancia, niv["ultimo"], confirmacion_velas)
-        niv["estado"] = estado
-        niv["dist_pct"] = (niv["precio"] - precio_actual) / precio_actual * 100
-        niv["antig_dias"] = (ts_final - niv["ultimo"]) / 86400000
+class LockFile:
+    def __init__(self, path):
+        self.path = path
 
-    vigentes = [niv for niv in niveles if niv["estado"] in ("vivo", "flip")]
-    techos = sorted((niv for niv in vigentes if _rol_efectivo(niv) == "techo"),
-                     key=lambda d: abs(d["dist_pct"]))
-    suelos = sorted((niv for niv in vigentes if _rol_efectivo(niv) == "suelo"),
-                     key=lambda d: abs(d["dist_pct"]))
+    def adquirir(self, timeout=5):
+        inicio = time.time()
+        while time.time() - inicio < timeout:
+            try:
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                return True
+            except FileExistsError:
+                time.sleep(0.5)
+        return False
 
-    return dict(ruta=ruta, velas=velas, niveles=niveles, atr_ref=atr_ref, tolerancia=tolerancia,
-                precio_actual=precio_actual, techos=techos, suelos=suelos)
-
-
-def _avisos_zona_indecision(techos, suelos):
-    """Un techo/suelo NO roto sigue vigente sin importar de que lado quedo
-    el precio - pero si el mas cercano ya quedo del lado 'equivocado' (el
-    precio lo supero o lo perdio sin ruptura confirmada), no hay una banda
-    techo-arriba/suelo-abajo limpia alrededor del precio: es zona de
-    indecision, no de rango operable. Mejor esperar a que el precio
-    confirme direccion (rompa de verdad, o vuelva a respetar el nivel)
-    antes de tomar esa zona como valida para entradas/salidas."""
-    avisos = []
-    if techos and techos[0]["dist_pct"] < 0:
-        avisos.append(f"el techo vigente mas cercano ({techos[0]['precio']:.4f}) ya quedo "
-                       f"por DEBAJO del precio, sin ruptura confirmada")
-    if suelos and suelos[0]["dist_pct"] > 0:
-        avisos.append(f"el suelo vigente mas cercano ({suelos[0]['precio']:.4f}) ya quedo "
-                       f"por ENCIMA del precio, sin ruptura confirmada")
-    return avisos
+    def liberar(self):
+        try:
+            os.remove(self.path)
+        except FileNotFoundError:
+            pass
 
 
-def _imprimir_niveles(niv_lista, etiqueta):
-    print(f"\n{etiqueta}, del mas cercano al mas lejos:")
-    for niv in niv_lista:
-        origen_de = "suelo" if niv["tipo"] == "techo" else "techo"
-        origen = f"  [flip desde {origen_de}]" if niv["estado"] == "flip" else ""
-        print(f"  {niv['precio']:>12.4f}  dist {niv['dist_pct']:>7.2f}%  "
-              f"toques {niv['toques']:>3}  antig {niv['antig_dias']:>6.1f}d{origen}")
+def _guardar_atomico(ruta, datos):
+    fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(ruta) or ".")
+    try:
+        os.write(fd, json.dumps(datos, indent=2).encode())
+        os.close(fd)
+        os.replace(temp_path, ruta)
+    except:
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
+        raise
+
+
+def _cargar_json(ruta, default=None):
+    if not os.path.exists(ruta):
+        return default
+    try:
+        with open(ruta) as f:
+            return json.load(f)
+    except:
+        return default
+
+
+def _hash_dict(d):
+    return hash(json.dumps(d, sort_keys=True))
+
+
+def _guardar_snapshot_csv(ruta, timestamp, precio, tf_objetivo, niveles, modo, iteracion):
+    """Guarda o append snapshot CSV."""
+    agregar_cabecera = not os.path.exists(ruta)
+
+    with open(ruta, 'a', newline='') as f:
+        writer = csv.writer(f)
+
+        if agregar_cabecera:
+            cabecera = ['timestamp', 'precio', 'tf_objetivo', 'num_niveles']
+            for i in range(len(niveles)):
+                cabecera.extend([f'niv{i}_tipo', f'niv{i}_precio', f'niv{i}_toques', f'niv{i}_estado', f'niv{i}_dist_pct'])
+            cabecera.extend(['modo', 'iteracion'])
+            writer.writerow(cabecera)
+
+        fila = [_fmt_fecha(timestamp), f"{precio:.4f}", tf_objetivo, len(niveles)]
+        for niv in niveles:
+            fila.extend([niv.get('tipo', ''), f"{niv.get('precio', 0):.4f}", niv.get('toques', 0), niv.get('estado', ''), f"{niv.get('dist_pct', 0):.2f}"])
+        fila.extend([modo, iteracion])
+        writer.writerow(fila)
+
+
+def loop_principal(coin, tf_objetivo, tf_alimentacion, intervalo_seg, desde_dias, confirmacion_velas):
+    directorio_base = Path(__file__).parent / "niveles"
+    directorio_base.mkdir(exist_ok=True)
+
+    lock = LockFile(str(directorio_base / f".niveles_{coin}_{tf_objetivo}.lock"))
+    if not lock.adquirir():
+        print(f"ERROR: Ya hay instancia para {coin} {tf_objetivo}")
+        return
+
+    try:
+        tf_alimentacion_ms = _tf_a_ms(tf_alimentacion)
+        tf_objetivo_ms = _tf_a_ms(tf_objetivo)
+        
+        if tf_alimentacion_ms >= tf_objetivo_ms:
+            print(f"ERROR: --cada{tf_alimentacion} debe ser MENOR que {tf_objetivo}")
+            print(f"Ej: python niveles_soporte.py eth 5m --cada1m --loop 300")
+            return
+
+        state_file = str(directorio_base / f"state_{coin}_{tf_objetivo}.json")
+        params_file = str(directorio_base / f"params_{coin}_{tf_objetivo}.json")
+        csv_file = str(directorio_base / f"snapshots_{coin}_{tf_objetivo}_cada{tf_alimentacion}.csv")
+        nivel_file_tpl = str(directorio_base / f"nivel_{coin.upper()}_k{{}}_toques{{}}.json")
+
+        print(f"[{_fmt_fecha(int(datetime.now(timezone.utc).timestamp() * 1000))}] Iniciando LOOP")
+        print(f"  Objetivo: {tf_objetivo}, Alimentación: {tf_alimentacion}, Intervalo: {intervalo_seg}s")
+        print(f"  CSV: {csv_file}\n")
+
+        velas_alimentacion, ruta_alimentacion = _cargar_velas(coin, tf_alimentacion, desde_dias)
+        ts_hoy = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+        state = _cargar_json(state_file, {
+            "modo": "backtest",
+            "última_vela_procesada_idx": 0,
+            "params_hash": None,
+            "precio_actual": None,
+            "num_niveles": 0
+        })
+
+        iteracion = 0
+
+        while not _debe_terminar:
+            iteracion += 1
+            ts_ahora = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+            try:
+                # Cargar parámetros
+                params = _cargar_json(params_file, {})
+                params_hash = _hash_dict(params)
+
+                if not params:
+                    print(f"[{_fmt_fecha(ts_ahora)}] ⏳ Esperando {params_file}")
+                    time.sleep(intervalo_seg)
+                    continue
+
+                # Detectar cambio de parámetros
+                if params_hash != state.get("params_hash"):
+                    if state.get("params_hash") is not None:
+                        print(f"\n[{_fmt_fecha(ts_ahora)}] ⚠️  PARÁMETROS CAMBIARON → recalculando...\n")
+                    state["params_hash"] = params_hash
+
+                k = params.get("k")
+                tolerancia_atr = params.get("tolerancia_atr")
+                toques_min = params.get("toques_min")
+
+                if k is None or tolerancia_atr is None or toques_min is None:
+                    print(f"[{_fmt_fecha(ts_ahora)}] ❌ Parámetros incompletos")
+                    time.sleep(intervalo_seg)
+                    continue
+
+                # Procesar velas
+                idx_desde = state.get("última_vela_procesada_idx", 0)
+
+                if state["modo"] == "backtest":
+                    if idx_desde < len(velas_alimentacion):
+                        velas_slice = velas_alimentacion[idx_desde:idx_desde + 300]
+                        if not velas_slice:
+                            velas_slice = velas_alimentacion[idx_desde:]
+
+                        velas_objetivo = _agregar_velas(velas_slice, tf_alimentacion_ms, tf_objetivo_ms)
+
+                        if len(velas_objetivo) >= 20:
+                            ts_inicio = time.time()
+                            niveles, atr_ref, tolerancia = detectar_niveles(
+                                velas_objetivo, k, tolerancia_atr, toques_min)
+
+                            _evaluar_niveles(velas_objetivo, niveles, confirmacion_velas)
+
+                            precio_actual = velas_slice[-1][4] if velas_slice else None
+
+                            # Guardar snapshot
+                            ts_vela = velas_slice[-1][0] if velas_slice else ts_ahora
+                            _guardar_snapshot_csv(csv_file, ts_vela, precio_actual, tf_objetivo, niveles, "backtest", iteracion)
+
+                            # Guardar niveles
+                            nivel_file = nivel_file_tpl.format(k, toques_min)
+                            datos_nivel = {
+                                "timestamp": _fmt_fecha(ts_ahora),
+                                "params": params,
+                                "niveles": niveles,
+                                "precio_actual": precio_actual,
+                                "num_niveles": len(niveles),
+                                "modo": "backtest"
+                            }
+                            _guardar_atomico(nivel_file, datos_nivel)
+
+                            state["última_vela_procesada_idx"] = idx_desde + len(velas_slice)
+                            state["precio_actual"] = precio_actual
+                            state["num_niveles"] = len(niveles)
+
+                            if iteracion % 10 == 0:
+                                print(f"[{_fmt_fecha(ts_ahora)}] ✓ Iter {iteracion}: {len(niveles)} niveles, precio={precio_actual:.4f}", flush=True)
+
+                            # Detectar si llegó a HOY
+                            if velas_slice[-1][0] >= ts_hoy - 300000:  # Últimas 5 min
+                                print(f"\n[{_fmt_fecha(ts_ahora)}] 🔄 Transición BACKTEST → LIVE\n")
+                                state["modo"] = "live"
+
+                        _guardar_atomico(state_file, state)
+                    else:
+                        state["modo"] = "live"
+                        _guardar_atomico(state_file, state)
+
+                elif state["modo"] == "live":
+                    # En live, esperaría nuevas velas desde descargar_bit.py
+                    # Por ahora, simula que llegó a fin
+                    print(f"[{_fmt_fecha(ts_ahora)}] 🟢 LIVE (esperando nuevas velas)")
+                    break
+
+                time.sleep(intervalo_seg)
+
+            except Exception as e:
+                print(f"[{_fmt_fecha(ts_ahora)}] ❌ Error: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                time.sleep(intervalo_seg)
+
+    finally:
+        lock.liberar()
+        print(f"[{_fmt_fecha(int(datetime.now(timezone.utc).timestamp() * 1000))}] Finalizado")
 
 
 def main():
@@ -282,92 +491,34 @@ def main():
     if len(args) < 2:
         print(__doc__)
         return
-    coin, tf = args[0], args[1]
-    resto = args[2:]
 
-    k = tolerancia_atr = toques_min = None
+    coin, tf_objetivo = args[0], args[1]
+
+    tf_alimentacion = None
+    intervalo_seg = None
     desde_dias = None
     confirmacion_velas = 2
-    tf_macro = None
-    i = 0
-    while i < len(resto):
-        if resto[i] == "--k":
-            i += 1; k = int(resto[i])
-        elif resto[i] == "--tolerancia-atr":
-            i += 1; tolerancia_atr = float(resto[i])
-        elif resto[i] == "--toques-min":
-            i += 1; toques_min = int(resto[i])
-        elif resto[i] == "--desde-dias":
-            i += 1; desde_dias = float(resto[i])
-        elif resto[i] == "--confirmacion-velas":
-            i += 1; confirmacion_velas = int(resto[i])
-        elif resto[i] == "--tf-macro":
-            i += 1; tf_macro = resto[i]
+
+    i = 2
+    while i < len(args):
+        if args[i].startswith("--cada"):
+            tf_alimentacion = args[i][6:]
+        elif args[i] == "--loop":
+            i += 1
+            intervalo_seg = int(args[i])
+        elif args[i] == "--desde-dias":
+            i += 1
+            desde_dias = float(args[i])
+        elif args[i] == "--confirmacion-velas":
+            i += 1
+            confirmacion_velas = int(args[i])
         i += 1
 
-    if k is None or tolerancia_atr is None or toques_min is None:
-        print("Faltan parametros obligatorios: --k, --tolerancia-atr, --toques-min")
-        print("(sin defaults a proposito - ver cabecera del archivo)")
+    if intervalo_seg is None or tf_alimentacion is None:
+        print("Requiere: --cada<TF> --loop <seg>")
         return
 
-    r = _analizar(coin, tf, k, tolerancia_atr, toques_min, desde_dias, confirmacion_velas)
-    velas, niveles = r["velas"], r["niveles"]
-
-    print(f"Historico: {r['ruta']} ({len(velas)} velas"
-          + (f", ultimos {desde_dias:.0f} dias" if desde_dias else ", todo") + ")")
-    if velas:
-        print(f"Rango: {_fmt_fecha(velas[0][0])} -> {_fmt_fecha(velas[-1][0])}")
-
-    print(f"\nk={k}  tolerancia_atr={tolerancia_atr}  toques_min={toques_min}  "
-          f"confirmacion_velas={confirmacion_velas}  "
-          f"(ATR referencia={r['atr_ref']:.4f}, tolerancia en precio={r['tolerancia']:.4f})")
-    print(f"Precio actual: {r['precio_actual']:.4f}")
-    print(f"\n{len(niveles)} niveles confirmados:\n")
-    print(f"{'tipo':<7} {'precio':>12} {'toques':>7}  {'estado':<12} {'dist%':>8}  {'antig(d)':>8}  "
-          f"{'primer toque':>16}   {'ultimo toque':>16}")
-    for niv in sorted(niveles, key=lambda d: -d["precio"]):
-        if niv["estado"] == "flip":
-            rol_nuevo = "suelo" if niv["tipo"] == "techo" else "techo"
-            estado_txt = f"flip->{rol_nuevo}"
-        else:
-            estado_txt = niv["estado"]
-        print(f"{niv['tipo']:<7} {niv['precio']:>12.4f} {niv['toques']:>7}  {estado_txt:<12} "
-              f"{niv['dist_pct']:>7.2f}%  {niv['antig_dias']:>8.1f}  "
-              f"{_fmt_fecha(niv['primero']):>16}   {_fmt_fecha(niv['ultimo']):>16}")
-
-    print(f"\n=== Niveles vigentes ahora (vivos/flip, roto excluido) ===")
-    _imprimir_niveles(r["techos"], "Techos (resistencia)")
-    _imprimir_niveles(r["suelos"], "Suelos (soporte)")
-    for aviso in _avisos_zona_indecision(r["techos"], r["suelos"]):
-        print(f"\nAVISO: {aviso} -> zona de indecision, no de rango operable. "
-              f"Esperar a que el precio confirme direccion antes de operar aca.")
-
-    if tf_macro is None:
-        return
-
-    rm = _analizar(coin, tf_macro, k, tolerancia_atr, toques_min, desde_dias, confirmacion_velas)
-    techo_macro = min((n for n in rm["techos"] if n["dist_pct"] > 0),
-                       key=lambda d: d["dist_pct"], default=None)
-    suelo_macro = max((n for n in rm["suelos"] if n["dist_pct"] < 0),
-                       key=lambda d: d["dist_pct"], default=None)
-
-    print(f"\n=== Rango macro (tf {tf_macro}, mismos k/tolerancia-atr/toques-min) ===")
-    print(f"Tope superior: {techo_macro['precio']:.4f} (dist {techo_macro['dist_pct']:.2f}%)"
-          if techo_macro else "Tope superior: sin techo macro vivo por encima del precio")
-    print(f"Tope inferior: {suelo_macro['precio']:.4f} (dist {suelo_macro['dist_pct']:.2f}%)"
-          if suelo_macro else "Tope inferior: sin suelo macro vivo por debajo del precio")
-
-    lo = suelo_macro["precio"] if suelo_macro else float("-inf")
-    hi = techo_macro["precio"] if techo_macro else float("inf")
-    techos_ajustados = [n for n in r["techos"] if lo <= n["precio"] <= hi]
-    suelos_ajustados = [n for n in r["suelos"] if lo <= n["precio"] <= hi]
-
-    print(f"\n=== Niveles de {tf} ajustados al rango macro ===")
-    _imprimir_niveles(techos_ajustados, "Techos (resistencia)")
-    _imprimir_niveles(suelos_ajustados, "Suelos (soporte)")
-    for aviso in _avisos_zona_indecision(techos_ajustados, suelos_ajustados):
-        print(f"\nAVISO: {aviso} -> zona de indecision, no de rango operable. "
-              f"Esperar a que el precio confirme direccion antes de operar aca.")
+    loop_principal(coin, tf_objetivo, tf_alimentacion, intervalo_seg, desde_dias, confirmacion_velas)
 
 
 if __name__ == "__main__":

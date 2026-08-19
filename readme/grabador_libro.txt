@@ -1,0 +1,215 @@
+GRABADOR_LIBRO - Captura en vivo del orderbook
+
+===============================================================================
+INSTALACIÓN EN NAS (Synology)
+===============================================================================
+
+1. SSH al NAS:
+   ssh admin@NAS_IP
+
+2. Crear directorio de logs:
+   mkdir -p /volume1/homes/Fran/neo/herramientas/logs
+
+3. Copiar grabador_libro.conf a supervisord:
+   sudo cp grabador_libro.conf /etc/supervisor/conf.d/grabador_libro.conf
+
+4. Reiniciar supervisord:
+   sudo supervisorctl reread
+   sudo supervisorctl update
+
+5. Verificar estado:
+   sudo supervisorctl status grabador_libro_btceth
+   sudo supervisorctl status grabador_libro_altcoins
+
+===============================================================================
+USO MANUAL
+===============================================================================
+
+Básico (BTC, ETH cada 15s, profundidad 20):
+  python grabador_libro.py
+
+BTC y ETH cada 10 segundos:
+  python grabador_libro.py btc,eth --cada 10
+
+Con monedas adicionales:
+  python grabador_libro.py btc,eth,icp,sol --cada 15
+
+Mayor profundidad del libro (50 niveles):
+  python grabador_libro.py btc,eth --profundidad 50
+
+Refrescar funding rate más a menudo:
+  python grabador_libro.py btc,eth --funding-cada 60 --cada 15
+
+===============================================================================
+SALIDA CSV
+===============================================================================
+
+Columnas:
+  timestamp_local_ms     - Timestamp local (máquina NAS)
+  fecha_utc              - Fecha/hora en formato ISO
+  timestamp_exchange_ms  - Timestamp del exchange (Bitget)
+  estado                 - 'ok' o 'error_libro' si falló
+  coin                   - BTC, ETH, etc
+  imbalance              - Imbalance de volumen (10 niveles)
+  imbalance_niveles      - Siempre 10
+  open_interest          - Open interest del mercado
+  funding_rate_pct       - Funding rate en %
+  long_short_ratio       - Long/short ratio del mercado
+  n_trades               - Nº de trades ejecutados
+  vol_buy                - Volumen comprador
+  vol_sell               - Volumen vendedor
+  delta_vol              - Volumen neto (buy - sell)
+  cvd                    - Cumulative Volume Delta (acumulado)
+  bids_json              - JSON completo de bids: [[precio, cantidad], ...]
+  asks_json              - JSON completo de asks: [[precio, cantidad], ...]
+
+===============================================================================
+DETECCIÓN DE GAPS
+===============================================================================
+
+Los datos tienen gaps si:
+  - estado = 'error_libro': Fallo de red/API con Bitget
+  - timestamp_exchange_ms vacío: Libro no se obtuvo del exchange
+
+Para análisis posterior:
+  - Filtrar solo filas con estado='ok'
+  - O registrar rangos de fechas con gaps
+  - Los datos dentro de gaps son inválidos para backtesting
+
+===============================================================================
+SUPERVISORD - AUTORESTARTS
+===============================================================================
+
+Ver logs en tiempo real:
+  sudo supervisorctl tail -f grabador_libro_btceth
+
+Ver últimas 100 líneas:
+  sudo tail -100 /volume1/homes/Fran/neo/herramientas/logs/grabador_libro.log
+
+Parar un proceso:
+  sudo supervisorctl stop grabador_libro_btceth
+
+Iniciar:
+  sudo supervisorctl start grabador_libro_btceth
+
+Reiniciar:
+  sudo supervisorctl restart grabador_libro_btceth
+
+===============================================================================
+DESINSTALACIÓN / DESACTIVAR TODO
+===============================================================================
+
+Si quieres detener completamente el grabador sin dejar nada corriendo:
+
+1. Parar supervisord:
+   sudo supervisorctl stop grabador_libro_btceth
+   sudo supervisorctl stop grabador_libro_altcoins
+
+2. Verificar que está detenido:
+   sudo supervisorctl status
+
+3. Remover configuración de supervisord:
+   sudo rm /etc/supervisor/conf.d/grabador_libro.conf
+
+4. Recargar supervisord:
+   sudo supervisorctl reread
+   sudo supervisorctl update
+
+5. Matar cualquier proceso Python que quedó:
+   ps aux | grep grabador_libro
+   kill -9 <PID>  (si hay alguno)
+
+6. Verificar que no hay nada corriendo:
+   ps aux | grep grabador_libro
+   (no debe retornar nada)
+
+7. Limpiar archivos (OPCIONAL - elimina datos):
+   rm -rf /volume1/homes/Fran/neo/herramientas/libro/flujo_*.csv
+   rm -rf /volume1/homes/Fran/neo/herramientas/logs/*
+
+===============================================================================
+TAMAÑO ESTIMADO
+===============================================================================
+
+Por moneda:
+  - 1.8 MB/hora
+  - 43 MB/día
+  - 1.3 GB/mes
+  - 4 GB/3 meses
+
+Con 2 monedas (BTC, ETH):
+  - 8 GB en 3 meses
+
+Con 4 monedas (BTC, ETH, ICP, SOL):
+  - 16 GB en 3 meses
+
+===============================================================================
+EMERGENCY STOP (Parada inmediata)
+===============================================================================
+
+Si necesitas parar TODO inmediatamente sin esperar:
+
+  sudo supervisorctl stop all
+  
+O parar solo uno:
+
+  sudo supervisorctl stop grabador_libro_btceth
+
+Para verificar que todo se detuvo:
+
+  sudo supervisorctl status
+  ps aux | grep grabador_libro
+
+Nada debe aparecer.
+
+===============================================================================
+VERIFICAR QUÉ ESTÁ CORRIENDO
+===============================================================================
+
+Ver todos los procesos del grabador:
+  sudo supervisorctl status
+
+Ver logs en tiempo real:
+  sudo supervisorctl tail -f grabador_libro_btceth
+
+Ver últimas líneas de error:
+  tail -20 /volume1/homes/Fran/neo/herramientas/logs/grabador_libro_err.log
+
+Ver archivo CSV que se está escribiendo:
+  ls -lh /volume1/homes/Fran/neo/herramientas/libro/flujo_*.csv
+
+Contar filas del CSV (cuántos registros se han grabado):
+  wc -l /volume1/homes/Fran/neo/herramientas/libro/flujo_*.csv
+
+===============================================================================
+PRUEBAS EN FRÍO (BACKTESTING)
+===============================================================================
+
+Los datos están listos para backtesting. Ejemplo Python:
+
+  import pandas as pd
+  import json
+
+  df = pd.read_csv('flujo_20260819_BTC-ETH.csv')
+
+  # Filtrar solo datos válidos
+  df_valid = df[df['estado'] == 'ok'].copy()
+
+  # Parsear libro
+  df_valid['bids'] = df_valid['bids_json'].apply(
+      lambda x: json.loads(x) if x else []
+  )
+  df_valid['asks'] = df_valid['asks_json'].apply(
+      lambda x: json.loads(x) if x else []
+  )
+
+  # Precio mejor comprador
+  df_valid['bid_price'] = df_valid['bids'].apply(
+      lambda x: x[0][0] if x else None
+  )
+
+  # CVD es realista desde cuando se grabó
+  print(f"Rango: {df_valid['fecha_utc'].min()} a {df_valid['fecha_utc'].max()}")
+  print(f"Filas válidas: {len(df_valid)} de {len(df)}")
+
+===============================================================================

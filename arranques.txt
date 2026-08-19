@@ -1,0 +1,268 @@
+════════════════════════════════════════════════════════════════════════
+ARQUITECTURA FINAL: niveles_soporte.py (BACKTEST + LIVE)
+════════════════════════════════════════════════════════════════════════
+
+1. INVOCACIÓN
+═════════════
+python niveles_soporte.py <tf_objetivo> --cada<tf_alimentacion> --loop <intervalo>
+
+Ejemplos:
+  python niveles_soporte.py eth 5m --cada1m --loop 300
+  python niveles_soporte.py eth 15m --cada3m --loop 400 --desde-dias 180
+
+Parámetros:
+  <tf_objetivo>         → 5m, 15m, 1h (timeframe de niveles a calcular)
+  --cada<tf_alimentacion> → 1m, 3m, 5m (velas de entrada, menores)
+  --loop <intervalo>    → segundos entre recalculaciones
+  [--desde-dias N]      → limita histórico (opcional, para pruebas)
+
+
+2. ESTRUCTURA ARCHIVOS
+═══════════════════════
+~/neo/herramientas/niveles/
+├─ params_eth_5m.json           ← Parámetros dinámicos (editable en caliente)
+├─ state_eth_5m.json            ← Estado: última vela procesada, modo (backtest/live)
+├─ snapshots_eth_5m_cada1m.csv  ← OUTPUT: vela-por-vela con niveles
+├─ .niveles_eth_5m.lock         ← Lock file (evita múltiples instancias)
+└─ nivel_ETH_k3_toques3.json    ← Últimos niveles calculados (versionado)
+
+
+3. FLUJOS
+═════════
+
+BACKTEST (histórico 1m → 5m):
+  ┌─ Itera velas_eth_1m.csv cronológicamente
+  ├─ Agrupa 1m → 5m (cada 5 velas 1m = 1 vela 5m nueva)
+  ├─ Detecta niveles 5m
+  ├─ Escribe snapshot CSV: (timestamp, precio_1m_actual, niveles_5m)
+  ├─ Verifica: ¿llegué a HOY? (última vela histórica)
+  └─ Si sí → modo LIVE
+
+LIVE (sin histórico, espera nuevas velas):
+  ┌─ Descargar_bit.py genera velas 1m nuevas
+  ├─ niveles_soporte agrupa a 5m
+  ├─ Calcula niveles
+  ├─ Append CSV snapshot (continúa desde donde paró backtest)
+  └─ Repite cada <intervalo>
+
+
+4. JSON CONFIGURACIÓN
+══════════════════════
+params_eth_5m.json (editable en caliente):
+{
+  "k": 3,
+  "tolerancia_atr": 0.25,
+  "toques_min": 3,
+  "confirmacion_velas": 2
+}
+
+
+5. JSON ESTADO
+══════════════
+state_eth_5m.json (actualizado por script):
+{
+  "modo": "backtest",          ← "backtest" o "live"
+  "última_vela_procesada_ts": 1690000000000,
+  "última_vela_tf_1m": 1690000000000,    ← última 1m que ingirió
+  "última_vela_tf_5m": 1690000000000,    ← última 5m que calculó
+  "params_hash": "abc123",      ← para detectar cambios
+  "num_niveles": 12,
+  "precio_actual": 1234.56,
+  "ts_último_recalculo": 1690000000000
+}
+
+
+6. CSV SNAPSHOTS (OUTPUT PRINCIPAL)
+════════════════════════════════════
+snapshots_eth_5m_cada1m.csv
+
+Columnas:
+  timestamp_vela_1m, precio_1m, tf_objetivo, num_niveles,
+  nivel_1_tipo, nivel_1_precio, nivel_1_toques, nivel_1_estado, nivel_1_dist_pct,
+  nivel_2_tipo, nivel_2_precio, nivel_2_toques, nivel_2_estado, nivel_2_dist_pct,
+  ...
+  modo, iteracion
+
+Ejemplo:
+  2023-07-01T00:01, 1234.56, 5m, 3,
+  techo, 1250.00, 5, vivo, 1.23,
+  suelo, 1200.00, 4, vivo, -2.82,
+  techo, 1270.00, 3, flip, 2.89,
+  backtest, 1
+
+
+7. LOCKS (ANTI-DUPLICADOS + ATOMIC WRITES)
+════════════════════════════════════════════
+Mutex file: .niveles_eth_5m.lock
+  ├─ Previene 2 instancias simultáneas
+  ├─ Timeout: 5s (espera, luego falla)
+  └─ Se libera al terminar o error
+
+Atomic writes:
+  ├─ Escribe a temp file
+  ├─ Reemplaza atómicamente (os.replace)
+  └─ Si se interrumpe → archivo viejo intacto
+
+
+8. DETECCIÓN DE CAMBIOS DE PARÁMETROS
+══════════════════════════════════════
+Cada iteración:
+  ├─ Lee params_eth_5m.json
+  ├─ Calcula hash(params)
+  ├─ Si hash ≠ state.params_hash:
+  │   ├─ Log: "⚠️  PARÁMETROS CAMBIARON"
+  │   ├─ Recalcula TODO desde estado actual (NO desde inicio)
+  │   └─ Actualiza state.params_hash
+  └─ Continúa
+
+
+9. DETECCIÓN AUTOMÁTICA BACKTEST → LIVE
+═════════════════════════════════════════
+En backtest:
+  ├─ Itera histórico vela-por-vela
+  ├─ Verifica: ¿última vela 1m en histórico < HOY?
+  ├─ Si llegó a HOY:
+  │   ├─ state.modo = "live"
+  │   ├─ Espera próximas velas 1m desde descargar_bit.py
+  │   └─ Continúa loop normal
+  └─ Si está en vivo y llegan nuevas 1m:
+      ├─ Procesa normalmente
+      └─ Continúa CSV snapshot
+
+
+10. LOGGING
+════════════
+Salida a stdout (redirigido a log):
+  [2026-08-19 17:09] Iniciando LOOP eth 5m, modo=backtest, cada=1m, intervalo=300s
+  [2026-08-19 17:09] Parámetros: k=3, toques=3, ...
+  [2026-08-19 17:09] ⚠️  PARÁMETROS CAMBIARON
+  [2026-08-19 17:10] ✓ Iteración 1: 12 niveles, precio=1234.56
+  [2026-08-19 17:10] [1/6] Extrayendo datos...
+  [2026-08-19 17:11] [2/6] ATR calculado: 2.5s
+  [2026-08-19 17:11] ✅ Recalculación completada en 8.3s
+  [2026-08-19 17:11] CSV snapshot guardado: snapshots_eth_5m_cada1m.csv
+
+
+11. BLOQUEOS (FLOWCHART)
+═════════════════════════
+Lock acquired (5s timeout)
+  │
+  ├─ Lee parámetros
+  ├─ Si cambiaron:
+  │   └─ Recalcula histórico desde estado actual
+  │
+  ├─ Lee state (última vela procesada)
+  ├─ Si modo=backtest:
+  │   ├─ Carga velas_eth_1m.csv desde última_vela_procesada
+  │   ├─ Agrupa 1m → 5m
+  │   ├─ Detecta niveles
+  │   ├─ Escribe snapshot CSV
+  │   ├─ Si llegó a HOY → modo=live
+  │   └─ state.última_vela_procesada_ts = ahora
+  │
+  ├─ Si modo=live:
+  │   ├─ Espera velas nuevas desde descargar_bit.py
+  │   ├─ Procesa igual (agrupa, detecta, CSV)
+  │   └─ state.última_vela_procesada_ts = ahora
+  │
+  ├─ Guarda state.json (atomic write)
+  ├─ Guarda nivel_ETH_k3_toques3.json (atomic write)
+  ├─ Guarda snapshot CSV (append, atomic)
+  │
+  ├─ Sleep <intervalo>
+  └─ Repeat (o exit si Ctrl+C)
+
+Lock released
+
+
+12. CONSIDERACIONES
+════════════════════
+- CSV snapshot: append-only (nunca sobreescribe)
+- State: actualiza después de CSV (evita pérdida de datos)
+- Lock: timeout 5s (si otra instancia está lenta, espera)
+- Backtest vs Live: automático, transparente
+- Multi-instancia: lock file previene
+- Parámetros dinámicos: detecta cambios cada iteración
+
+Linux (bash, servidor):
+
+kill -INT
+ps -ef | grep herramientas | grep -v grep
+
+
+
+python -u ~/neo/herramientas/grabador_libro.py btc >> ~/neo/herramientas/libro/libro_btc.log 2>&1 &
+python -u ~/neo/herramientas/grabador_libro.py eth >> ~/neo/herramientas/libro/libro_eth.log 2>&1 &
+python -u ~/neo/herramientas/grabador_libro.py icp >> ~/neo/herramientas/libro/libro_icp.log 2>&1 &
+
+
+python -u ~/neo/herramientas/descargar_bit.py eth --loop >> ~/neo/herramientas/velas/eth.log 2>&1 &
+
+python -u ~/neo/herramientas/niveles_soporte.py eth 5m --loop 300 >> ~/neo/herramientas/niveles/niveles_eth.log 2>&1 &
+
+
+
+
+
+
+
+
+
+nohup venv/bin/python -u herramientas/niveles.py --actualizar icp 4h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas/niveles/icp_4h.log 2>&1 &
+nohup venv/bin/python -u herramientas/niveles.py --actualizar btc 4h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas/niveles/btc_4h.log 2>&1 &
+nohup venv/bin/python -u herramientas/niveles.py --actualizar eth 4h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas/niveles/eth_4h.log 2>&1 &
+nohup venv/bin/python -u herramientas/niveles.py --actualizar icp 1h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas/niveles/icp_1h.log 2>&1 &
+nohup venv/bin/python -u herramientas/niveles.py --actualizar btc 1h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas/niveles/btc_1h.log 2>&1 &
+nohup venv/bin/python -u herramientas/niveles.py --actualizar eth 1h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas/niveles/eth_1h.log 2>&1 &
+nohup venv/bin/python -u herramientas/niveles.py --actualizar icp 15m --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas/niveles/icp_15m.log 2>&1 &
+nohup venv/bin/python -u herramientas/niveles.py --actualizar btc 15m --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas/niveles/btc_15m.log 2>&1 &
+nohup venv/bin/python -u herramientas/niveles.py --actualizar eth 15m --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas/niveles/eth_15m.log 2>&1 &
+
+
+
+Windows (PowerShell, local):
+
+# Ver procesos python de herramientas/ corriendo (PID + linea de comando)
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -match 'herramientas' } | Select-Object ProcessId, CommandLine
+
+# Parar uno por PID (TerminateProcess: cierre en frio, no dispara el "except KeyboardInterrupt"
+# del script como si fuera Ctrl+C; los locks huerfanos se limpian solos al reiniciar la moneda)
+Stop-Process -Id <PID>
+
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\grabador_libro.py btc,eth,icp >> herramientas\grabador_libro\_salida.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\descargar_bit.py --velas icp --cada 60 >> herramientas\velas\icp.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\descargar_bit.py --velas eth --cada 60 >> herramientas\velas\eth.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\descargar_bit.py --velas btc --cada 60 >> herramientas\velas\btc.log 2>&1' -WindowStyle Hidden
+
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar icp 4h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\icp_4h.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar btc 4h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\btc_4h.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar eth 4h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\eth_4h.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar icp 1h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\icp_1h.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar btc 1h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\btc_1h.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar eth 1h --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\eth_1h.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar icp 15m --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\icp_15m.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar btc 15m --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\btc_15m.log 2>&1' -WindowStyle Hidden
+Start-Process -FilePath cmd.exe -ArgumentList '/c venv\Scripts\python.exe -u herramientas\niveles.py --actualizar eth 15m --k 3 --tolerancia-atr 0.25 --toques-min 4 --cada 60 >> herramientas\niveles\eth_15m.log 2>&1' -WindowStyle Hidden
+
+
+
+cd \\NAS_OFICINA\homes\Fran\neo-verificado\historicos
+python descargar_bin.py eth
+python descargar_bin.py btc
+
+
+
+cd \\NAS_OFICINA\homes\Fran\neo-verificado\herramientas
+python descargar_bit.py --velas icp
+python descargar_bit.py --velas eth
+
+python descargar_bit.py --velas eth
+python descargar_bit.py --validar-todo eth
+python descargar_bit.py --velas btc
+
+
+python verificacion/verificar_indicadores_historico.py btc 1h,4h
+
+
+
+

@@ -87,21 +87,13 @@ def precio(simbolo):
         raise ValueError(f"Error obteniendo precio {simbolo}: {e}")
 
 def libro(simbolo, depth=20):
-    """Obtiene libro de órdenes (bids/asks).
-
-    Args:
-        simbolo: str (ej: 'ETH/USDT:USDT')
-        depth: int (profundidad, por defecto 20)
-
-    Returns:
-        dict: {'bids': [[precio, cantidad], ...], 'asks': [[precio, cantidad], ...]}
-    """
     cliente = _init_cliente()
     try:
         orderbook = cliente.fetch_order_book(simbolo, limit=depth)
         return {
             'bids': orderbook.get('bids', []),
             'asks': orderbook.get('asks', []),
+            'timestamp': orderbook.get('timestamp'),
         }
     except Exception as e:
         raise ValueError(f"Error obteniendo libro {simbolo}: {e}")
