@@ -9,6 +9,14 @@ venv/
 __pycache__/
 *.pyc
 
+# NINGUN csv viaja en el repo. Son los ficheros que solo crecen (velas,
+# libro/OI, historicos, registro de operaciones) y se regeneran corriendo los
+# scripts; lo que haga falta en otro equipo se pasa por FTP. Un patron global
+# en vez de uno por cada convencion de nombre: asi no se cuela nada por
+# renombrar un fichero y olvidar actualizar esto - que es justo lo que pasaba
+# con historico_*.csv cuando las velas pasaron a llamarse bitget_*.csv.
+*.csv
+
 # Datos capturados en vivo (libro/OI) y velas descargadas - se regeneran
 # corriendo herramientas/grabador_libro.py / descargar_bit.py, no se suben.
 herramientas/libro/

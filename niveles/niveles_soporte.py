@@ -19,9 +19,22 @@ import signal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Este fichero vive en neo/niveles/. Las carpetas se resuelven por __file__,
+# asi que mover o copiar el arbol no rompe nada (igual que velas/velas_bit.py).
+DIR_NIVELES = Path(__file__).resolve().parent
+DIR_LOGS = DIR_NIVELES / "logs"
+DIR_JSON = DIR_NIVELES / "json"
+DIR_NEO = DIR_NIVELES.parent
+
+sys.path.insert(0, str(DIR_NEO))
 from mercado import indicadores
-from herramientas.descargar_bit import _archivo as _archivo_bitget
+from velas.velas_bit import _archivo as _archivo_bitget
+
+
+def _crear_directorios():
+    """logs/ y json/ se crean solas en cualquier equipo."""
+    for d in (DIR_LOGS, DIR_JSON):
+        d.mkdir(parents=True, exist_ok=True)
 
 _debe_terminar = False
 
@@ -346,8 +359,8 @@ def _guardar_snapshot_csv(ruta, timestamp, precio, tf_objetivo, niveles, modo, i
 
 
 def loop_principal(coin, tf_objetivo, tf_alimentacion, intervalo_seg, desde_dias, confirmacion_velas):
-    directorio_base = Path(__file__).parent / "niveles"
-    directorio_base.mkdir(exist_ok=True)
+    _crear_directorios()
+    directorio_base = DIR_JSON
 
     lock = LockFile(str(directorio_base / f".niveles_{coin}_{tf_objetivo}.lock"))
     if not lock.adquirir():

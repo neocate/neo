@@ -1,0 +1,77 @@
+CONTENIDO DEL PUSH
+==================================================================
+Generado por revisar_push.py el 2026-08-20 01:49
+
+39 fichero(s) en 14 carpeta(s), 424 KB
+
+Esto es lo que SI viaja en el push. Lo que no aparece aqui esta
+ignorado y hay que moverlo por FTP (velas, libro, historicos).
+Si algo sobra o falta, se ajusta el .gitignore a mano.
+==================================================================
+
+(raiz)/    [8 fichero(s), 170 KB]
+    .env.example                           161 B
+    .gitignore                              2 KB
+    arranques.txt                          13 KB
+    contenido_push.txt                      3 KB
+    monitor.py                             91 KB
+    requirements.txt                        31 B
+    revisar_push.py                        15 KB
+    telegram_control.py                    47 KB
+
+alertas/    [2 fichero(s), 2 KB]
+    __init__.py                             35 B
+    avisos.py                               2 KB
+
+estrategia/    [5 fichero(s), 43 KB]
+    __init__.py                             42 B
+    contexto.py                             9 KB
+    escalera.py                             8 KB
+    filtros.py                             11 KB
+    senales.py                             16 KB
+
+herramientas/    [4 fichero(s), 40 KB]
+    descargar_bin.py                        8 KB
+    ejemplo_backtesting.py                  3 KB
+    grabador_libro.py                      10 KB
+    monitor_niveles.py                     19 KB
+
+herramientas/niveles/    [1 fichero(s), 63 B]
+    params_eth_1m.json                      63 B
+
+mercado/    [6 fichero(s), 37 KB]
+    __init__.py                             79 B
+    contrato.py                             6 KB
+    datos.py                                6 KB
+    flujo.py                                4 KB
+    indicadores.py                         11 KB
+    lectura.py                             10 KB
+
+niveles/    [2 fichero(s), 50 KB]
+    auditoria_y_pendiente.txt              32 KB
+    niveles_soporte.py                     18 KB
+
+posicion/    [2 fichero(s), 28 KB]
+    __init__.py                            117 B
+    posicion.py                            28 KB
+
+registro/    [2 fichero(s), 7 KB]
+    __init__.py                             54 B
+    csv_monitor.py                          7 KB
+
+test/    [1 fichero(s), 4 KB]
+    verificar_continuidad_streaming.py      4 KB
+
+velas/    [3 fichero(s), 43 KB]
+    descargar_bit.py                        6 KB
+    descargar_hist_bit.py                   7 KB
+    velas_bit.py                           31 KB
+
+velas/ETH/    [1 fichero(s), 0 B]
+    .gitkeep                                 0 B
+
+velas/lock/    [1 fichero(s), 0 B]
+    .gitkeep                                 0 B
+
+velas/log/    [1 fichero(s), 0 B]
+    .gitkeep                                 0 B
