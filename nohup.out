@@ -1,0 +1,306 @@
+python: can't open file 'grabador_libro.py': [Errno 2] No such file or directory
+/volume1/homes/Fran/neo/venv/lib/python3.8/site-packages/ccxt/base/exchange.py:42: CryptographyDeprecationWarning: Python 3.8 is no longer supported by the Python core team and support for it is deprecated in cryptography. The next release of cryptography will remove support for Python 3.8.
+  from cryptography.hazmat import backends
+Grabando ETH cada 15s (profundidad 20) -> /volume1/homes/Fran/neo/libro/datos/libro_20260820_ETH.csv
+Funding cada 300s, long/short ratio cada 300s
+Campos: timestamp_local, timestamp_exchange, estado, imbalance, OI, funding, L/S, trades, CVD, bids_json, asks_json
+Ctrl+C para parar.
+/volume1/homes/Fran/neo/venv/lib/python3.8/site-packages/ccxt/base/exchange.py:42: CryptographyDeprecationWarning: Python 3.8 is no longer supported by the Python core team and support for it is deprecated in cryptography. The next release of cryptography will remove support for Python 3.8.
+  from cryptography.hazmat import backends
+2026-08-20 18:42:30 - INFO - Grabando ETH cada 15s (profundidad 20) -> /volume1/homes/Fran/neo/libro/datos/libro_20260820_ETH.csv
+2026-08-20 18:42:30 - INFO - Funding cada 300s, long/short ratio cada 300s
+/volume1/homes/Fran/neo/venv/lib/python3.8/site-packages/ccxt/base/exchange.py:42: CryptographyDeprecationWarning: Python 3.8 is no longer supported by the Python core team and support for it is deprecated in cryptography. The next release of cryptography will remove support for Python 3.8.
+  from cryptography.hazmat import backends
+2026-08-20 18:44:16 - ERROR - Otra instancia en ejecución. Saliendo.
+venv/bin/python: can't open file 'libro/descargar_bit.py': [Errno 2] No such file or directory
+/volume1/homes/Fran/neo/venv/lib/python3.8/site-packages/ccxt/base/exchange.py:42: CryptographyDeprecationWarning: Python 3.8 is no longer supported by the Python core team and support for it is deprecated in cryptography. The next release of cryptography will remove support for Python 3.8.
+  from cryptography.hazmat import backends
+
+[ETH] TF: 1m, 3m, 5m, 15m, 30m, 1h, 4h, 1d - daemon
+
+[18:53:41] ETH 1m
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [LOTE] 89 vela(s) -> 2026-08-20 16:52:00
+
+[18:53:52] ETH 3m
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [LOTE] 26 vela(s) -> 2026-08-20 16:48:00
+
+[18:53:52] ETH 5m
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [LOTE] 9 vela(s) -> 2026-08-20 16:45:00
+
+[18:53:53] ETH 15m
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [LOTE] 2 vela(s) -> 2026-08-20 16:30:00
+
+[18:53:53] ETH 30m
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  Al dia (2026-08-20 16:00:00)
+
+[18:53:53] ETH 1h
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  Al dia (2026-08-20 15:00:00)
+
+[18:53:53] ETH 4h
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  Al dia (2026-08-20 12:00:00)
+
+[18:53:53] ETH 1d
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  Al dia (2026-08-19 00:00:00)
+
+============================================================
+[DAEMON] ETH - TF: 1m, 3m, 5m, 15m, 30m, 1h, 4h, 1d
+  Cada TF se despierta en su propio cierre (+1s de margen)
+============================================================
+
+[18:53:53] Proximo cierre: 1m, 3m en 8s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 16:53:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 16:51:00 guardada
+
+[18:54:01] Proximo cierre: 1m, 5m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 16:54:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 16:50:00 guardada
+
+[18:55:01] Proximo cierre: 1m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 16:55:00 guardada
+
+[18:56:01] Proximo cierre: 1m, 3m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 16:56:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 16:54:00 guardada
+
+[18:57:01] Proximo cierre: 1m en 59s
+/volume1/homes/Fran/neo/venv/lib/python3.8/site-packages/ccxt/base/exchange.py:42: CryptographyDeprecationWarning: Python 3.8 is no longer supported by the Python core team and support for it is deprecated in cryptography. The next release of cryptography will remove support for Python 3.8.
+  from cryptography.hazmat import backends
+2026-08-20 18:57:12 - INFO - Grabando ETH cada 15s (profundidad 20) -> /volume1/homes/Fran/neo/libro/datos/libro_20260820_ETH.csv
+2026-08-20 18:57:12 - INFO - Funding cada 300s, long/short ratio cada 300s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 16:57:00 guardada
+
+[18:58:01] Proximo cierre: 1m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 16:58:00 guardada
+
+[18:59:01] Proximo cierre: 1m, 3m, 5m, 15m, 30m, 1h en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 16:59:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 16:57:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 16:55:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 16:45:00 guardada
+  [VELA] 2026-08-20 16:30:00 guardada
+  [VELA] 2026-08-20 16:00:00 guardada
+
+[19:00:02] Proximo cierre: 1m en 58s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:00:00 guardada
+
+[19:01:01] Proximo cierre: 1m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:01:00 guardada
+
+[19:02:01] Proximo cierre: 1m, 3m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:02:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:00:00 guardada
+
+[19:03:01] Proximo cierre: 1m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:03:00 guardada
+
+[19:04:01] Proximo cierre: 1m, 5m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:04:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:00:00 guardada
+
+[19:05:01] Proximo cierre: 1m, 3m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:05:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:03:00 guardada
+
+[19:06:01] Proximo cierre: 1m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:06:00 guardada
+
+[19:07:01] Proximo cierre: 1m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:07:00 guardada
+
+[19:08:01] Proximo cierre: 1m, 3m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:08:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:06:00 guardada
+
+[19:09:01] Proximo cierre: 1m, 5m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:09:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:05:00 guardada
+
+[19:10:01] Proximo cierre: 1m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:10:00 guardada
+
+[19:11:01] Proximo cierre: 1m, 3m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:11:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:09:00 guardada
+
+[19:12:01] Proximo cierre: 1m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:12:00 guardada
+
+[19:13:01] Proximo cierre: 1m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:13:00 guardada
+
+[19:14:01] Proximo cierre: 1m, 3m, 5m, 15m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:14:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:12:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:10:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:00:00 guardada
+
+[19:15:02] Proximo cierre: 1m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:15:00 guardada
+
+[19:16:01] Proximo cierre: 1m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:16:00 guardada
+
+[19:17:01] Proximo cierre: 1m, 3m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:17:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:15:00 guardada
+
+[19:18:01] Proximo cierre: 1m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:18:00 guardada
+
+[19:19:01] Proximo cierre: 1m, 5m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:19:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:15:00 guardada
+
+[19:20:01] Proximo cierre: 1m, 3m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:20:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:18:00 guardada
+
+[19:21:01] Proximo cierre: 1m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:21:00 guardada
+
+[19:22:01] Proximo cierre: 1m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:22:00 guardada
+
+[19:23:01] Proximo cierre: 1m, 3m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:23:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:21:00 guardada
+
+[19:24:01] Proximo cierre: 1m, 5m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:24:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:20:00 guardada
+
+[19:25:01] Proximo cierre: 1m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:25:00 guardada
+
+[19:26:01] Proximo cierre: 1m, 3m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:26:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:24:00 guardada
+
+[19:27:01] Proximo cierre: 1m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:27:00 guardada
+
+[19:28:01] Proximo cierre: 1m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:28:00 guardada
+
+[19:29:01] Proximo cierre: 1m, 3m, 5m, 15m, 30m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:29:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:27:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:25:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:15:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:00:00 guardada
+
+[19:30:02] Proximo cierre: 1m en 58s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:30:00 guardada
+
+[19:31:01] Proximo cierre: 1m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:31:00 guardada
+
+[19:32:01] Proximo cierre: 1m, 3m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:32:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:30:00 guardada
+
+[19:33:01] Proximo cierre: 1m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:33:00 guardada
+
+[19:34:01] Proximo cierre: 1m, 5m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:34:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:30:00 guardada
+
+[19:35:01] Proximo cierre: 1m, 3m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:35:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:33:00 guardada
+
+[19:36:01] Proximo cierre: 1m en 59s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:36:00 guardada
+
+[19:37:01] Proximo cierre: 1m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:37:00 guardada
+
+[19:38:01] Proximo cierre: 1m, 3m en 60s
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:38:00 guardada
+  [SANEADO] 1 byte(s) sueltos al final del CSV (transferencia a medias): recortados
+  [VELA] 2026-08-20 17:36:00 guardada
+
+[19:39:01] Proximo cierre: 1m, 5m en 59s

@@ -1,0 +1,186 @@
+================================================================================
+GRABADOR DE LIBRO DE ÓRDENES (grabador_libro.py)
+================================================================================
+
+DESCRIPCIÓN
+-----------
+Script que graba en CSV: libro de órdenes (bids/asks JSON), open interest,
+funding rate, trade flow (CVD) y long/short ratio. Datos irrecuperables que
+solo están disponibles en tiempo real, no en históricos del exchange.
+
+ESTRUCTURA DE CARPETAS
+----------------------
+libro/
+├── leeme.txt                (este archivo)
+├── grabador_libro.py        (script principal)
+├── datos/                   (archivos CSV generados)
+│   ├── libro_YYYYMMDD_COIN.csv
+│   └── .gitkeep             (para versionamiento git)
+├── logs/                    (archivos de log futuros)
+│   └── .gitkeep
+└── test/                    (scripts de prueba)
+    └── .gitkeep
+
+DEPENDENCIAS
+-----------
+- Python 3.7+
+- ccxt
+- dotenv
+- Variables de entorno configuradas:
+  * BITGET_API_KEY
+  * BITGET_SECRET_KEY
+  * BITGET_PASSPHRASE
+
+USO BÁSICO
+----------
+
+1. POWERSHELL (Windows)
+   =====================
+
+   Ejecución simple (BTC y ETH, default):
+   $ cd D:\neocat\nas\libro
+   $ python grabador_libro.py
+
+   Monedas específicas:
+   $ python grabador_libro.py btc,eth,sol
+
+   Con opciones:
+   $ python grabador_libro.py btc,eth --cada 10 --profundidad 30
+
+   En segundo plano (mantener ejecutando cuando cierres terminal):
+   $ python grabador_libro.py > $null 2>&1 &
+
+   O con Start-Process:
+   $ Start-Process python -ArgumentList "grabador_libro.py" -WindowStyle Hidden
+
+   Ver proceso en ejecución:
+   $ Get-Process python
+
+
+2. SSH (Linux/Mac/Windows con WSL)
+   ================================
+
+   Ejecución simple:
+   $ cd ~/neo/libro
+   $ python grabador_libro.py
+
+   Monedas específicas:
+   $ python grabador_libro.py btc,eth,sol
+
+   Con opciones:
+   $ python grabador_libro.py btc,eth --cada 10 --profundidad 30
+
+   En segundo plano (foreground):
+   $ nohup python grabador_libro.py &
+   $ disown
+
+   Con tmux (recomendado):
+   $ tmux new-session -d -s libro "python grabador_libro.py"
+
+   Adjuntar a sesión:
+   $ tmux attach -t libro
+
+   Ver procesos tmux:
+   $ tmux list-sessions
+
+   Matar proceso:
+   $ tmux kill-session -t libro
+
+
+OPCIONES
+--------
+
+--cada N           Segundos entre capturas (default: 15)
+                   $ python grabador_libro.py --cada 10
+
+--profundidad N    Niveles del libro (default: 20)
+                   $ python grabador_libro.py --profundidad 50
+
+--funding-cada N   Segundos entre updates funding rate (default: 300 = 5 min)
+                   $ python grabador_libro.py --funding-cada 600
+
+--ls-ratio-cada N  Segundos entre updates long/short ratio (default: 300 = 5 min)
+                   $ python grabador_libro.py --ls-ratio-cada 600
+
+
+EJEMPLOS COMPLETOS
+------------------
+
+1. Grabar BTC cada 5 segundos, profundidad 100:
+   $ python grabador_libro.py btc --cada 5 --profundidad 100
+
+2. Grabar BTC, ETH y SOL cada 20 segundos:
+   $ python grabador_libro.py btc,eth,sol --cada 20
+
+3. Grabar con máxima profundidad, updates lentos:
+   $ python grabador_libro.py btc,eth --profundidad 100 --funding-cada 600 --ls-ratio-cada 600
+
+
+SALIDA
+------
+Ubicación: ./datos/libro_YYYYMMDD_MONEDAS.csv
+
+Campos CSV:
+- timestamp_local_ms:      cuando se capturó (máquina local, ms)
+- fecha_utc:               fecha UTC (YYYY-MM-DD HH:MM:SS)
+- timestamp_exchange_ms:   cuando se capturó según exchange (ms)
+- estado:                  'ok' o 'error_libro' si fallo
+- coin:                    moneda (BTC, ETH, SOL, etc)
+- imbalance:               desequilibrio libro [-1, +1]
+- imbalance_niveles:       niveles usados para imbalance
+- open_interest:           open interest
+- funding_rate_pct:        funding rate (%)
+- long_short_ratio:        ratio long/short
+- n_trades:                número de trades nuevos
+- vol_buy:                 volumen buy (moneda base)
+- vol_sell:                volumen sell (moneda base)
+- delta_vol:               diferencia vol_buy - vol_sell
+- cvd:                     cumulative volume delta
+- bids_json:               libro de compras completo (JSON)
+- asks_json:               libro de ventas completo (JSON)
+
+Nota: Si cabecera no coincide, el script genera nuevo archivo con sufijo _v2, _v3, etc.
+
+
+PARAR EJECUCIÓN
+---------------
+
+PowerShell:
+- Ctrl+C en la terminal donde corre
+- O: Get-Process python | Stop-Process
+
+SSH/tmux:
+- Ctrl+C si está en foreground
+- O: tmux kill-session -t libro
+
+
+TROUBLESHOOTING
+---------------
+
+Error: "Otra instancia en ejecución. Saliendo."
+→ Ya hay otro grabador corriendo con los mismos parámetros
+→ Verificar: ps aux | grep grabador_libro.py (SSH)
+→ Matar con: kill PID
+
+Error: "Error trayendo velas", "Error obteniendo libro", etc.
+→ Problema con conexión a Bitget
+→ Verificar variables de entorno (BITGET_API_KEY, etc)
+→ Verificar conexión a internet
+
+CSV con columnas vacías:
+→ Normal si datos no están disponibles en el momento
+→ El script continúa grabando, usa valores previos o "-"
+
+
+MANTENIMIENTO
+-------------
+
+Archivos antiguos en datos/:
+→ Limpiar manualmente después de análisis
+→ Comprimir con gzip si necesitas guardar histórico
+
+Estructura se crea automáticamente:
+→ No necesitas crear carpetas manualmente
+→ .gitkeep en carpetas vacías para git
+
+================================================================================

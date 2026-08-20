@@ -6,7 +6,7 @@
 # históricos del exchange.
 #
 # Uso:
-#   python herramientas/grabador_libro.py [monedas] [opciones]
+#   python libro/grabador_libro.py [monedas] [opciones]
 #   Monedas: btc,eth,sol (default: btc,eth)
 #   Opciones:
 #     --cada N           segundos entre capturas (default: 15)
@@ -15,9 +15,9 @@
 #     --ls-ratio-cada N  segundos entre updates L/S ratio (default: 300)
 #
 # Ejemplos:
-#   python herramientas/grabador_libro.py
-#   python herramientas/grabador_libro.py btc,eth --cada 10
-#   python herramientas/grabador_libro.py btc,eth,icp --profundidad 30 --cada 5
+#   python libro/grabador_libro.py
+#   python libro/grabador_libro.py btc,eth --cada 10
+#   python libro/grabador_libro.py btc,eth,icp --profundidad 30 --cada 5
 #
 # CSV contiene:
 #   timestamp_local_ms: cuando se capturó (máquina local)
@@ -28,6 +28,7 @@
 
 import csv
 import json
+import logging
 import os
 import sys
 import time
@@ -43,7 +44,10 @@ else:
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mercado import datos, flujo
 
-DIR_LIBRO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libro")
+DIR_BASE = os.path.dirname(os.path.abspath(__file__))
+DIR_DATOS = os.path.join(DIR_BASE, "datos")
+DIR_LOGS = os.path.join(DIR_BASE, "logs")
+DIR_TEST = os.path.join(DIR_BASE, "test")
 
 CAMPOS_CSV = [
     "timestamp_local_ms", "fecha_utc", "timestamp_exchange_ms", "estado", "coin",
@@ -54,14 +58,50 @@ CAMPOS_CSV = [
 ]
 
 
+def _crear_estructura():
+    """Crea carpetas necesarias y archivos .gitkeep si no existen."""
+    directorios = [DIR_DATOS, DIR_LOGS, DIR_TEST]
+    for directorio in directorios:
+        os.makedirs(directorio, exist_ok=True)
+        gitkeep = os.path.join(directorio, ".gitkeep")
+        if not os.path.exists(gitkeep):
+            open(gitkeep, "a").close()
+
+
+def _configurar_logging(coins):
+    """Configura logging para escribir en logs/libro_MONEDAS.log"""
+    monedas_str = "-".join(c.upper() for c in coins)
+    log_file = os.path.join(DIR_LOGS, f"libro_{monedas_str}.log")
+    
+    logger = logging.getLogger("grabador_libro")
+    logger.setLevel(logging.INFO)
+    
+    if logger.handlers:
+        logger.handlers.clear()
+    
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', 
+                                  datefmt='%Y-%m-%d %H:%M:%S')
+    
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(logging.INFO)
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+    
+    return logger
+
+
 def _archivo(coins):
-    os.makedirs(DIR_LIBRO, exist_ok=True)
     fecha = datetime.now(timezone.utc).strftime("%Y%m%d")
     monedas = "-".join(c.upper() for c in coins)
-    return os.path.join(DIR_LIBRO, f"flujo_{fecha}_{monedas}.csv")
+    return os.path.join(DIR_DATOS, f"libro_{fecha}_{monedas}.csv")
 
 
-def _ruta_compatible(ruta):
+def _ruta_compatible(ruta, logger):
     if not os.path.exists(ruta):
         return ruta
     with open(ruta, newline="", encoding="utf-8") as f:
@@ -73,11 +113,11 @@ def _ruta_compatible(ruta):
     while os.path.exists(f"{base}_v{n}{ext}"):
         n += 1
     nueva = f"{base}_v{n}{ext}"
-    print(f"(aviso) {ruta} cabecera distinta, usando {nueva}")
+    logger.warning(f"{ruta} cabecera distinta, usando {nueva}")
     return nueva
 
 
-def _funding_pct(coin, simbolo, cache, funding_cada):
+def _funding_pct(coin, simbolo, cache, funding_cada, logger):
     valor_previo, ultimo = cache.get(coin, (None, 0.0))
     ahora = time.monotonic()
     if ahora - ultimo < funding_cada:
@@ -86,13 +126,13 @@ def _funding_pct(coin, simbolo, cache, funding_cada):
         r = datos.funding_rate(simbolo)
         valor = r * 100 if r is not None else valor_previo
     except Exception as e:
-        print(f"  (aviso) funding_rate {coin}: {e}")
+        logger.warning(f"funding_rate {coin}: {e}")
         valor = valor_previo
     cache[coin] = (valor, ahora)
     return valor
 
 
-def _ls_ratio(coin, simbolo, cache, ls_ratio_cada):
+def _ls_ratio(coin, simbolo, cache, ls_ratio_cada, logger):
     valor_previo, ultimo = cache.get(coin, (None, 0.0))
     ahora = time.monotonic()
     if ahora - ultimo < ls_ratio_cada:
@@ -100,26 +140,25 @@ def _ls_ratio(coin, simbolo, cache, ls_ratio_cada):
     try:
         valor = datos.long_short_ratio(simbolo)
         if valor is None:
-            # OPCIÓN 3: usar último valor válido si existe, sino "-" (sin datos)
             if valor_previo is not None:
-                print(f"  (aviso) long_short_ratio {coin}: sin datos, usando previo={valor_previo}")
+                logger.info(f"long_short_ratio {coin}: sin datos, usando previo={valor_previo}")
                 valor = valor_previo
             else:
-                print(f"  (aviso) long_short_ratio {coin}: sin datos disponibles")
+                logger.info(f"long_short_ratio {coin}: sin datos disponibles")
                 valor = "-"
     except Exception as e:
-        print(f"  (aviso) long_short_ratio {coin}: {e}")
+        logger.warning(f"long_short_ratio {coin}: {e}")
         valor = valor_previo if valor_previo is not None else "-"
     cache[coin] = (valor, ahora)
     return valor
 
 
-def _trade_flow(coin, simbolo, cache):
+def _trade_flow(coin, simbolo, cache, logger):
     estado = cache.setdefault(coin, {"cursor": None, "cvd": 0.0, "iniciado": False})
     try:
         trades = datos.trades(simbolo, desde=estado["cursor"], limite=500)
     except Exception as e:
-        print(f"  (aviso) trades {coin}: {e}")
+        logger.warning(f"trades {coin}: {e}")
         return 0, 0.0, 0.0, estado["cvd"]
 
     if not estado["iniciado"]:
@@ -149,7 +188,7 @@ def _trade_flow(coin, simbolo, cache):
     return n, vb, vs, estado["cvd"]
 
 
-def _aplicar_lock(arch):
+def _aplicar_lock(arch, logger):
     """Aplica file lock multiplataforma (Windows/Linux) para evitar race conditions."""
     try:
         if platform.system() == "Windows":
@@ -157,7 +196,7 @@ def _aplicar_lock(arch):
         else:
             fcntl.flock(arch.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (IOError, OSError):
-        print("(error) Otra instancia en ejecución. Saliendo.")
+        logger.error("Otra instancia en ejecución. Saliendo.")
         arch.close()
         sys.exit(1)
 
@@ -174,28 +213,28 @@ def _liberar_lock(arch):
 
 
 def _fila(coin, simbolo, profundidad, funding_cache, funding_cada,
-          ls_ratio_cache, ls_ratio_cada, trade_cache):
+          ls_ratio_cache, ls_ratio_cada, trade_cache, logger):
     ahora = datetime.now(timezone.utc)
     timestamp_local_ms = int(ahora.timestamp() * 1000)
     estado = "ok"
     timestamp_exchange_ms = None
-    
+
     try:
         libro = datos.libro(simbolo, depth=profundidad)
     except Exception as e:
-        print(f"  (aviso) libro {coin}: {e}")
+        logger.warning(f"libro {coin}: {e}")
         libro = None
         estado = "error_libro"
-    
+
     try:
         oi = datos.open_interest(simbolo)
     except Exception as e:
-        print(f"  (aviso) open_interest {coin}: {e}")
+        logger.warning(f"open_interest {coin}: {e}")
         oi = None
-    
-    funding = _funding_pct(coin, simbolo, funding_cache, funding_cada)
-    ls_ratio = _ls_ratio(coin, simbolo, ls_ratio_cache, ls_ratio_cada)
-    n_trades, vol_buy, vol_sell, cvd = _trade_flow(coin, simbolo, trade_cache)
+
+    funding = _funding_pct(coin, simbolo, funding_cache, funding_cada, logger)
+    ls_ratio = _ls_ratio(coin, simbolo, ls_ratio_cache, ls_ratio_cada, logger)
+    n_trades, vol_buy, vol_sell, cvd = _trade_flow(coin, simbolo, trade_cache, logger)
 
     bids = None
     asks = None
@@ -226,12 +265,16 @@ def _fila(coin, simbolo, profundidad, funding_cache, funding_cada,
 
 
 def main():
+    _crear_estructura()
+
     args = sys.argv[1:]
     if args and not args[0].startswith("--"):
         coins = [c.strip().upper() for c in args[0].split(",")]
         args = args[1:]
     else:
         coins = ["BTC", "ETH"]
+    
+    logger = _configurar_logging(coins)
 
     cada = 15.0
     profundidad = 20
@@ -254,22 +297,19 @@ def main():
         i += 1
 
     simbolos = {c: datos.normalizar_simbolo(c, "f")[0] for c in coins}
-    ruta = _ruta_compatible(_archivo(coins))
+    ruta = _ruta_compatible(_archivo(coins), logger)
     nuevo = not os.path.exists(ruta)
     arch = open(ruta, "a", newline="")
-    
-    # Aplicar file lock para evitar race conditions con múltiples instancias
-    _aplicar_lock(arch)
-    
+
+    _aplicar_lock(arch, logger)
+
     writer = csv.DictWriter(arch, fieldnames=CAMPOS_CSV)
     if nuevo:
         writer.writeheader()
         arch.flush()
 
-    print(f"Grabando {', '.join(coins)} cada {cada:.0f}s (profundidad {profundidad}) -> {ruta}")
-    print(f"Funding cada {funding_cada:.0f}s, long/short ratio cada {ls_ratio_cada:.0f}s")
-    print("Campos: timestamp_local, timestamp_exchange, estado, imbalance, OI, funding, L/S, trades, CVD, bids_json, asks_json")
-    print("Ctrl+C para parar.")
+    logger.info(f"Grabando {', '.join(coins)} cada {cada:.0f}s (profundidad {profundidad}) -> {ruta}")
+    logger.info(f"Funding cada {funding_cada:.0f}s, long/short ratio cada {ls_ratio_cada:.0f}s")
     funding_cache = {}
     ls_ratio_cache = {}
     trade_cache = {}
@@ -277,12 +317,12 @@ def main():
         while True:
             for coin in coins:
                 fila = _fila(coin, simbolos[coin], profundidad, funding_cache, funding_cada,
-                             ls_ratio_cache, ls_ratio_cada, trade_cache)
+                             ls_ratio_cache, ls_ratio_cada, trade_cache, logger)
                 writer.writerow(fila)
                 arch.flush()
             time.sleep(cada)
     except KeyboardInterrupt:
-        print("\nParado por el usuario.")
+        logger.info("Parado por el usuario.")
     finally:
         _liberar_lock(arch)
         arch.close()
