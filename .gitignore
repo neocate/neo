@@ -17,6 +17,10 @@ __pycache__/
 # con historico_*.csv cuando las velas pasaron a llamarse bitget_*.csv.
 *.csv
 
+# JSON excluido excepto indicadores_config.json
+*.json
+!indicadores_config.json
+
 # Datos capturados en vivo (libro/OI) y velas descargadas - se regeneran
 # corriendo herramientas/grabador_libro.py / descargar_bit.py, no se suben.
 herramientas/libro/

@@ -330,9 +330,9 @@ def extremos_locales(velas, k=3):
         alto_j, bajo_j = velas[j][2], velas[j][3]
         vecinos_altos = [velas[x][2] for x in range(j - k, j + k + 1) if x != j]
         vecinos_bajos = [velas[x][3] for x in range(j - k, j + k + 1) if x != j]
-        if alto_j >= max(vecinos_altos):
+        if alto_j > max(vecinos_altos):
             altos.append(j)
-        if bajo_j <= min(vecinos_bajos):
+        if bajo_j < min(vecinos_bajos):
             bajos.append(j)
     return altos, bajos
 
