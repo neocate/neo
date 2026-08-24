@@ -1,48 +1,16 @@
-# Claves y secretos (NUNCA subir)
-.env
-
-# Entornos virtuales de Python
-venv/
-.venv/
-
-# Cache de Python
-__pycache__/
-*.pyc
-
-# NINGUN csv viaja en el repo. Son los ficheros que solo crecen (velas,
-# libro/OI, historicos, registro de operaciones) y se regeneran corriendo los
-# scripts; lo que haga falta en otro equipo se pasa por FTP. Un patron global
-# en vez de uno por cada convencion de nombre: asi no se cuela nada por
-# renombrar un fichero y olvidar actualizar esto - que es justo lo que pasaba
-# con historico_*.csv cuando las velas pasaron a llamarse bitget_*.csv.
+# Data files
 *.csv
-
-# JSON excluido excepto indicadores_config.json
 *.json
-!indicadores_config.json
+!parametros*.json
 
-# Datos capturados en vivo (libro/OI) y velas descargadas - se regeneran
-# corriendo herramientas/grabador_libro.py / descargar_bit.py, no se suben.
-herramientas/libro/
-historico_*.csv
-flujo_*.csv
+# Lock files
+velas/lock/*.lock
 
-# Registro de operaciones de monitor.py y avisos de monitor_niveles.py -
-# se regeneran corriendo los scripts, un fichero por ejecucion (fecha en
-# el nombre), no se suben - ya se documentaba como "igual de gitignored"
-# en registro/csv_monitor.py pero faltaba el patron aqui.
-monitor_*.csv
-avisos_*.csv
+# Output
+nohup.out
 
-# Cache de historicos completos (Binance, 2017+) - GBs de datos, cada PC
-# los descarga/actualiza con herramientas/descargar_bin.py (nombre real:
-# <DD-MM-AA>_<COIN>_<TF>_binance.csv, sin prefijo "historico_" - por eso
-# necesita su propio patron, el de arriba no lo cubre).
-herramientas/historicos/
-
-# Logs de procesos lanzados en background (ej. nohup ... > libro.log &).
-*.log
-
-# Backup del .git corrupto anterior (ver anotaciones.md 2026-08-07) - no es
-# parte del repo, se queda en disco por si hace falta mirar algo despues.
-.git.corrupto-*/
+# Temporal
+niveles/json/*
+niveles/logs/*
+!niveles/json/.gitkeep
+!niveles/logs/.gitkeep
