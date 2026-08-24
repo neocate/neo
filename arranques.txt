@@ -10,12 +10,16 @@ pkill -f "niveles.py" <- por ficheros
 
 ps -ef | grep "libro/libro.py" | grep -v grep
 nohup venv/bin/python -u libro/libro.py eth >/dev/null 2>&1 &
+python libro/libro.py eth
 tail -f libro/logs/libro_ETH.log
 
+params_eth_15m.json
 
 
 ps -ef | grep descargar_bit | grep -v grep
 nohup venv/bin/python -u velas/descargar_bit.py eth --loop &
+python velas/descargar_bit.py eth --loop
+
 tail -f velas/log/ETH_*.log
 
 
@@ -28,3 +32,6 @@ nohup venv/bin/python -u niveles/niveles.py eth 30m --loop 60 > /dev/null 2>&1 &
 nohup venv/bin/python -u niveles/niveles.py eth 1h --loop 60 > /dev/null 2>&1 &
 nohup venv/bin/python -u niveles/niveles.py eth 4h --loop 60 > /dev/null 2>&1 &
 nohup venv/bin/python -u niveles/niveles.py eth 1d --loop 60 > /dev/null 2>&1 &
+
+
+python niveles/niveles.py eth 15m --loop 60

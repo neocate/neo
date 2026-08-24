@@ -278,7 +278,7 @@ def _cargar_json(ruta, default=None):
     if not os.path.exists(ruta):
         return default
     try:
-        with open(ruta) as f:
+        with open(ruta, encoding='utf-8-sig') as f:
             return json.load(f)
     except:
         return default
@@ -322,16 +322,15 @@ def _guardar_snapshot_csv(ruta, timestamp, precio, tf_objetivo, niveles, modo, i
 
 def loop_principal(coin, tf_objetivo, intervalo_seg, desde_dias, confirmacion_velas):
     _crear_directorios()
-    directorio_base = DIR_JSON
 
-    lock = LockFile(str(directorio_base / f".niveles_{coin}_{tf_objetivo}.lock"))
+    lock = LockFile(str(DIR_JSON / f".niveles_{coin}_{tf_objetivo}.lock"))
     if not lock.adquirir():
         print(f"ERROR: Ya hay instancia para {coin} {tf_objetivo}")
         return
 
     try:
-        params_file = str(directorio_base / f"params_{coin}_{tf_objetivo}.json")
-        nivel_file_tpl = str(directorio_base / f"nivel_{coin.upper()}_k{{}}_toques{{}}.json")
+        params_file = str(DIR_NIVELES / f"params_{coin}_{tf_objetivo}.json")
+        nivel_file_tpl = str(DIR_JSON / f"nivel_{coin.upper()}_{tf_objetivo}_k{{}}_toques{{}}.json")
 
         print(f"[{_fmt_fecha(int(datetime.now(timezone.utc).timestamp() * 1000))}] Iniciando LOOP")
         print(f"  Objetivo: {tf_objetivo}, Intervalo: {intervalo_seg}s\n")
@@ -346,26 +345,23 @@ def loop_principal(coin, tf_objetivo, intervalo_seg, desde_dias, confirmacion_ve
             ts_ahora = int(datetime.now(timezone.utc).timestamp() * 1000)
 
             try:
-                params = _cargar_json(params_file, {})
+                params = _cargar_json(params_file)
+
+                if params is None:
+                    raise FileNotFoundError(f"Parámetros no encontrados: {params_file}")
 
                 if not params:
-                    print(f"[{_fmt_fecha(ts_ahora)}] ⏳ Esperando {params_file}")
-                    time.sleep(intervalo_seg)
-                    continue
+                    raise ValueError(f"Parámetros vacíos en: {params_file}")
 
                 k = params.get("k")
                 tolerancia_atr = params.get("tolerancia_atr")
                 toques_min = params.get("toques_min")
 
                 if k is None or tolerancia_atr is None or toques_min is None:
-                    print(f"[{_fmt_fecha(ts_ahora)}] ERROR Parámetros incompletos")
-                    time.sleep(intervalo_seg)
-                    continue
+                    raise ValueError(f"Parámetros incompletos: k={k}, tolerancia_atr={tolerancia_atr}, toques_min={toques_min}")
 
                 if not (1 <= k <= 20 and 0 < tolerancia_atr <= 5 and 1 <= toques_min <= 10):
-                    print(f"[{_fmt_fecha(ts_ahora)}] ERROR Parámetros fuera de rango: k={k} (1-20), tolerancia_atr={tolerancia_atr} (0-5), toques_min={toques_min} (1-10)")
-                    time.sleep(intervalo_seg)
-                    continue
+                    raise ValueError(f"Parámetros fuera de rango: k={k} (1-20), tolerancia_atr={tolerancia_atr} (0-5), toques_min={toques_min} (1-10)")
 
                 if len(velas_objetivo) >= 50:
                     niveles, atr_ref, tolerancia = detectar_niveles(
