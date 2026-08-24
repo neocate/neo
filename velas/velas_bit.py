@@ -723,8 +723,7 @@ def poner_al_dia(coin, timeframe, origen_ts=None):
     """F1: compara la ultima guardada con actual-1 y decide el camino.
 
       falta 0 velas -> al dia, no hace nada
-      falta 1 vela  -> se pide y se añade. NO aplica F3: si no llega o no
-                       empalma, se anota en el log y ya.
+      falta 1 vela  -> se pide, se valida con F3 (huecos) y se añade.
       faltan mas    -> LOTES (F2), que si aplica F3.
 
     Devuelve el numero de velas añadidas.
@@ -743,9 +742,20 @@ def poner_al_dia(coin, timeframe, origen_ts=None):
             _log(coin, timeframe,
                  f"[PENDIENTE] la vela {_fecha(destino)} aun no esta disponible")
             return 0
-        _anexar(ruta, velas[:1])
-        _log(coin, timeframe, f"[VELA] {_fecha(destino)} guardada")
-        return 1
+        velas_ok, reinicio, descartadas = _validar_lote(
+            coin, _simbolo(coin), timeframe, velas[:1], destino)
+        if reinicio:
+            previas = _contar_velas(ruta)
+            if previas or descartadas:
+                _log(coin, timeframe,
+                     f"[DESCARTE] {previas + descartadas:,} vela(s) descartada(s) "
+                     f"por falta de continuidad")
+            _crear_csv(ruta)
+        if velas_ok:
+            _anexar(ruta, velas_ok)
+            _log(coin, timeframe, f"[VELA] {_fecha(velas_ok[0][0])} guardada")
+            return len(velas_ok)
+        return 0
 
     return bajar_por_lotes(coin, timeframe, destino, origen_ts=origen_ts)
 

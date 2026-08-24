@@ -29,6 +29,35 @@
 #   estado: 'ok' o 'error_libro' si fallo
 #   bids_json, asks_json: libro completo en cada fila
 #   cvd: acumulativo intra-sesión, se resetea solo en reinicio explícito
+#
+# OJO con la fecha del nombre del CSV: libro_20260821_ETH.csv NO significa
+# "datos del 21". El nombre se calcula UNA vez, al arrancar, asi que indica
+# DESDE CUANDO CORRE ESE PROCESO, no de que dia son las filas. Una instancia
+# lanzada el dia 20 sigue escribiendo en libro_20260820_ETH.csv toda la noche
+# y todo el dia siguiente hasta que la pares: no rota a medianoche. Para saber
+# de que dia es cada fila, mirar la columna fecha_utc, nunca el nombre.
+#
+# Arranque en el NAS (Linux, por SSH):
+#
+#   Primera vez:
+#     python -m venv venv
+#     source venv/bin/activate
+#     python -m pip install -r requirements.txt
+#
+#   Uso diario, desde la raiz del proyecto (neo/):
+#     ps -ef | grep "libro/libro.py" | grep -v grep
+#     nohup venv/bin/python -u libro/libro.py eth >/dev/null 2>&1 &
+#     tail -f libro/logs/libro_ETH.log
+#     kill -INT <PID>
+#
+#   El >/dev/null evita el nohup.out, que solo duplicaria el fichero de log.
+#   Parar con -INT y no con SIGTERM: el script solo captura KeyboardInterrupt,
+#   que es lo que libera el lock, cierra el CSV y deja escrito "Parado por el
+#   usuario" en el log. Con pkill a secas esa traza no aparece y luego no
+#   distingues una parada tuya de una caida.
+#   Matar por PID y no con pkill -f: pueden convivir varias instancias (el lock
+#   es por fichero CSV, o sea por juego de monedas), y un pkill se las lleva
+#   todas por delante.
 # ---------------------------------------------------------------
 
 import csv

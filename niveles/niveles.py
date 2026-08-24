@@ -27,7 +27,7 @@ DIR_JSON = DIR_NIVELES / "json"
 DIR_NEO = DIR_NIVELES.parent
 
 sys.path.insert(0, str(DIR_NEO))
-from mercado import indicadores
+from indicadores import indicadores
 from velas.velas_bit import _archivo as _archivo_bitget
 
 
@@ -93,55 +93,6 @@ def _cargar_velas(coin, tf, desde_dias=None):
                 continue
             velas.append([ts, float(row[2]), float(row[3]), float(row[4]), float(row[5]), float(row[6])])
     return velas, ruta
-
-
-def _agregar_velas(velas_pequeñas, tf_pequeño_ms, tf_grande_ms):
-    """Agrupa velas menores a mayores. Ej: 1m → 5m."""
-    if not velas_pequeñas:
-        return []
-
-    velas_grandes = []
-    vela_actual = None
-
-    for v in velas_pequeñas:
-        ts, open_, high, low, close, volumen = v
-        ts_rounded = (ts // tf_grande_ms) * tf_grande_ms
-
-        if vela_actual is None or vela_actual["ts"] != ts_rounded:
-            if vela_actual is not None:
-                velas_grandes.append([
-                    vela_actual["ts"],
-                    vela_actual["open"],
-                    vela_actual["high"],
-                    vela_actual["low"],
-                    vela_actual["close"],
-                    vela_actual["volumen"]
-                ])
-            vela_actual = {
-                "ts": ts_rounded,
-                "open": open_,
-                "high": high,
-                "low": low,
-                "close": close,
-                "volumen": volumen
-            }
-        else:
-            vela_actual["high"] = max(vela_actual["high"], high)
-            vela_actual["low"] = min(vela_actual["low"], low)
-            vela_actual["close"] = close
-            vela_actual["volumen"] += volumen
-
-    if vela_actual is not None:
-        velas_grandes.append([
-            vela_actual["ts"],
-            vela_actual["open"],
-            vela_actual["high"],
-            vela_actual["low"],
-            vela_actual["close"],
-            vela_actual["volumen"]
-        ])
-
-    return velas_grandes
 
 
 def _mediana(xs):
@@ -310,16 +261,16 @@ class LockFile:
 
 
 def _guardar_atomico(ruta, datos):
-    fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(ruta) or ".")
+    ruta = Path(ruta)
+    fd, tmp = tempfile.mkstemp(dir=str(ruta.parent), suffix=".tmp")
     try:
-        os.write(fd, json.dumps(datos, indent=2).encode())
-        os.close(fd)
-        os.replace(temp_path, ruta)
-    except:
-        try:
-            os.unlink(temp_path)
-        except:
-            pass
+        with os.fdopen(fd, "w") as f:
+            json.dump(datos, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, ruta)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
         raise
 
 
@@ -335,6 +286,17 @@ def _cargar_json(ruta, default=None):
 
 def _hash_dict(d):
     return hash(json.dumps(d, sort_keys=True))
+
+
+def _log(coin, tf, mensaje, consola=False):
+    ruta_log = DIR_LOGS / f"niveles_{coin}_{tf}.log"
+    if consola:
+        print(f"  {mensaje}", flush=True)
+    try:
+        with open(ruta_log, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S}] {mensaje}\n")
+    except OSError as e:
+        print(f"  [AVISO] no se pudo escribir el log: {e}", flush=True)
 
 
 def _guardar_snapshot_csv(ruta, timestamp, precio, tf_objetivo, niveles, modo, iteracion):
@@ -358,7 +320,7 @@ def _guardar_snapshot_csv(ruta, timestamp, precio, tf_objetivo, niveles, modo, i
         writer.writerow(fila)
 
 
-def loop_principal(coin, tf_objetivo, tf_alimentacion, intervalo_seg, desde_dias, confirmacion_velas):
+def loop_principal(coin, tf_objetivo, intervalo_seg, desde_dias, confirmacion_velas):
     _crear_directorios()
     directorio_base = DIR_JSON
 
@@ -368,33 +330,14 @@ def loop_principal(coin, tf_objetivo, tf_alimentacion, intervalo_seg, desde_dias
         return
 
     try:
-        tf_alimentacion_ms = _tf_a_ms(tf_alimentacion)
-        tf_objetivo_ms = _tf_a_ms(tf_objetivo)
-        
-        if tf_alimentacion_ms >= tf_objetivo_ms:
-            print(f"ERROR: --cada{tf_alimentacion} debe ser MENOR que {tf_objetivo}")
-            print(f"Ej: python niveles_soporte.py eth 5m --cada1m --loop 300")
-            return
-
-        state_file = str(directorio_base / f"state_{coin}_{tf_objetivo}.json")
         params_file = str(directorio_base / f"params_{coin}_{tf_objetivo}.json")
-        csv_file = str(directorio_base / f"snapshots_{coin}_{tf_objetivo}_cada{tf_alimentacion}.csv")
         nivel_file_tpl = str(directorio_base / f"nivel_{coin.upper()}_k{{}}_toques{{}}.json")
 
         print(f"[{_fmt_fecha(int(datetime.now(timezone.utc).timestamp() * 1000))}] Iniciando LOOP")
-        print(f"  Objetivo: {tf_objetivo}, Alimentación: {tf_alimentacion}, Intervalo: {intervalo_seg}s")
-        print(f"  CSV: {csv_file}\n")
+        print(f"  Objetivo: {tf_objetivo}, Intervalo: {intervalo_seg}s\n")
+        _log(coin, tf_objetivo, f"[ARRANQUE] PID {os.getpid()} | objetivo {tf_objetivo} | intervalo {intervalo_seg}s", False)
 
-        velas_alimentacion, ruta_alimentacion = _cargar_velas(coin, tf_alimentacion, desde_dias)
-        ts_hoy = int(datetime.now(timezone.utc).timestamp() * 1000)
-
-        state = _cargar_json(state_file, {
-            "modo": "backtest",
-            "última_vela_procesada_idx": 0,
-            "params_hash": None,
-            "precio_actual": None,
-            "num_niveles": 0
-        })
+        velas_objetivo, ruta_csv = _cargar_velas(coin, tf_objetivo, desde_dias)
 
         iteracion = 0
 
@@ -403,20 +346,12 @@ def loop_principal(coin, tf_objetivo, tf_alimentacion, intervalo_seg, desde_dias
             ts_ahora = int(datetime.now(timezone.utc).timestamp() * 1000)
 
             try:
-                # Cargar parámetros
                 params = _cargar_json(params_file, {})
-                params_hash = _hash_dict(params)
 
                 if not params:
                     print(f"[{_fmt_fecha(ts_ahora)}] ⏳ Esperando {params_file}")
                     time.sleep(intervalo_seg)
                     continue
-
-                # Detectar cambio de parámetros
-                if params_hash != state.get("params_hash"):
-                    if state.get("params_hash") is not None:
-                        print(f"\n[{_fmt_fecha(ts_ahora)}] ⚠️  PARÁMETROS CAMBIARON → recalculando...\n")
-                    state["params_hash"] = params_hash
 
                 k = params.get("k")
                 tolerancia_atr = params.get("tolerancia_atr")
@@ -432,64 +367,26 @@ def loop_principal(coin, tf_objetivo, tf_alimentacion, intervalo_seg, desde_dias
                     time.sleep(intervalo_seg)
                     continue
 
-                # Procesar velas
-                idx_desde = state.get("última_vela_procesada_idx", 0)
+                if len(velas_objetivo) >= 50:
+                    niveles, atr_ref, tolerancia = detectar_niveles(
+                        velas_objetivo, k, tolerancia_atr, toques_min)
 
-                if state["modo"] == "backtest":
-                    if idx_desde < len(velas_alimentacion):
-                        velas_slice = velas_alimentacion[idx_desde:idx_desde + 300]
-                        if not velas_slice:
-                            velas_slice = velas_alimentacion[idx_desde:]
+                    _evaluar_niveles(velas_objetivo, niveles, confirmacion_velas, tolerancia)
 
-                        velas_objetivo = _agregar_velas(velas_slice, tf_alimentacion_ms, tf_objetivo_ms)
+                    precio_actual = velas_objetivo[-1][4] if velas_objetivo else None
 
-                        if len(velas_objetivo) >= 50:
-                            ts_inicio = time.time()
-                            niveles, atr_ref, tolerancia = detectar_niveles(
-                                velas_objetivo, k, tolerancia_atr, toques_min)
+                    nivel_file = nivel_file_tpl.format(k, toques_min)
+                    datos_nivel = {
+                        "timestamp": _fmt_fecha(ts_ahora),
+                        "params": params,
+                        "niveles": niveles,
+                        "precio_actual": precio_actual,
+                        "num_niveles": len(niveles)
+                    }
+                    _guardar_atomico(nivel_file, datos_nivel)
 
-                            _evaluar_niveles(velas_objetivo, niveles, confirmacion_velas, tolerancia)
-
-                            precio_actual = velas_slice[-1][4] if velas_slice else None
-
-                            # Guardar snapshot
-                            ts_vela = velas_slice[-1][0] if velas_slice else ts_ahora
-                            _guardar_snapshot_csv(csv_file, ts_vela, precio_actual, tf_objetivo, niveles, "backtest", iteracion)
-
-                            # Guardar niveles
-                            nivel_file = nivel_file_tpl.format(k, toques_min)
-                            datos_nivel = {
-                                "timestamp": _fmt_fecha(ts_ahora),
-                                "params": params,
-                                "niveles": niveles,
-                                "precio_actual": precio_actual,
-                                "num_niveles": len(niveles),
-                                "modo": "backtest"
-                            }
-                            _guardar_atomico(nivel_file, datos_nivel)
-
-                            state["última_vela_procesada_idx"] = idx_desde + len(velas_slice)
-                            state["precio_actual"] = precio_actual
-                            state["num_niveles"] = len(niveles)
-
-                            if iteracion % 10 == 0:
-                                print(f"[{_fmt_fecha(ts_ahora)}] OK Iter {iteracion}: {len(niveles)} niveles, precio={precio_actual:.4f}", flush=True)
-
-                            # Detectar si llegó a HOY
-                            if velas_slice[-1][0] >= ts_hoy - 300000:  # Últimas 5 min
-                                print(f"\n[{_fmt_fecha(ts_ahora)}] TRANSITION BACKTEST -> LIVE\n")
-                                state["modo"] = "live"
-
-                        _guardar_atomico(state_file, state)
-                    else:
-                        state["modo"] = "live"
-                        _guardar_atomico(state_file, state)
-
-                elif state["modo"] == "live":
-                    # En live, esperaría nuevas velas desde descargar_bit.py
-                    # Por ahora, simula que llegó a fin
-                    print(f"[{_fmt_fecha(ts_ahora)}] LIVE (esperando nuevas velas)")
-                    break
+                    if iteracion == 1 or iteracion % 10 == 0:
+                        print(f"[{_fmt_fecha(ts_ahora)}] OK Iter {iteracion}: {len(niveles)} niveles, precio={precio_actual:.4f}", flush=True)
 
                 time.sleep(intervalo_seg)
 
@@ -500,6 +397,7 @@ def loop_principal(coin, tf_objetivo, tf_alimentacion, intervalo_seg, desde_dias
                 time.sleep(intervalo_seg)
 
     finally:
+        _log(coin, tf_objetivo, f"[PARADA] PID {os.getpid()}", False)
         lock.liberar()
         print(f"[{_fmt_fecha(int(datetime.now(timezone.utc).timestamp() * 1000))}] Finalizado")
 
@@ -512,16 +410,13 @@ def main():
 
     coin, tf_objetivo = args[0], args[1]
 
-    tf_alimentacion = None
     intervalo_seg = None
     desde_dias = None
     confirmacion_velas = 2
 
     i = 2
     while i < len(args):
-        if args[i].startswith("--cada"):
-            tf_alimentacion = args[i][6:]
-        elif args[i] == "--loop":
+        if args[i] == "--loop":
             i += 1
             intervalo_seg = int(args[i])
         elif args[i] == "--desde-dias":
@@ -532,11 +427,11 @@ def main():
             confirmacion_velas = int(args[i])
         i += 1
 
-    if intervalo_seg is None or tf_alimentacion is None:
-        print("Requiere: --cada<TF> --loop <seg>")
+    if intervalo_seg is None:
+        print("Requiere: --loop <seg>")
         return
 
-    loop_principal(coin, tf_objetivo, tf_alimentacion, intervalo_seg, desde_dias, confirmacion_velas)
+    loop_principal(coin, tf_objetivo, intervalo_seg, desde_dias, confirmacion_velas)
 
 
 if __name__ == "__main__":

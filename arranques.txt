@@ -1,36 +1,30 @@
 Linux (bash, servidor):
 
-
 python -m venv venv
 source venv/bin/activate
 python -m pip install -r requirements.txt
 
 ps aux | grep python | grep -v grep
-
 kill -INT
+pkill -f "niveles.py" <- por ficheros
 
-
-ps -ef | grep libro | grep -v grep
-nohup venv/bin/python -u libro/libro.py eth &
+ps -ef | grep "libro/libro.py" | grep -v grep
+nohup venv/bin/python -u libro/libro.py eth >/dev/null 2>&1 &
 tail -f libro/logs/libro_ETH.log
-pkill -f libro/libro.py
+
 
 
 ps -ef | grep descargar_bit | grep -v grep
 nohup venv/bin/python -u velas/descargar_bit.py eth --loop &
-tail -f velas/logs/libro_ETH.log
+tail -f velas/log/ETH_*.log
 
 
 
-vas a auditar uns json con sesgo de analista informatico
-
-las respuestas claras y concisas
-
-sin formalidades
-
-lo que se te pide que analices, lo haces. No te quedes en suposiciones ni anotaciones de ficheros.
-
-
-
-
-
+nohup venv/bin/python -u niveles/niveles.py eth 1m --loop 60 > /dev/null 2>&1 &
+nohup venv/bin/python -u niveles/niveles.py eth 3m --loop 60 > /dev/null 2>&1 &
+nohup venv/bin/python -u niveles/niveles.py eth 5m --loop 60 > /dev/null 2>&1 &
+nohup venv/bin/python -u niveles/niveles.py eth 15m --loop 60 > /dev/null 2>&1 &
+nohup venv/bin/python -u niveles/niveles.py eth 30m --loop 60 > /dev/null 2>&1 &
+nohup venv/bin/python -u niveles/niveles.py eth 1h --loop 60 > /dev/null 2>&1 &
+nohup venv/bin/python -u niveles/niveles.py eth 4h --loop 60 > /dev/null 2>&1 &
+nohup venv/bin/python -u niveles/niveles.py eth 1d --loop 60 > /dev/null 2>&1 &
