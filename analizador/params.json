@@ -1,0 +1,75 @@
+{
+  "candles": {
+    "1m": 50,
+    "5m": 30,
+    "15m": 25,
+    "1h": 10,
+    "4h": 20
+  },
+  "niveles": {
+    "ruptura_max_dias": 1.0,
+    "proximidad_tolerancias": 2.0
+  },
+  "by_tf": {
+    "1m": {
+      "thresholds": {
+        "imbalance_long": 0.3,
+        "imbalance_short": -0.3,
+        "delta_long": 150,
+        "delta_short": -150,
+        "vol_ratio_high": 1.0,
+        "vol_ratio_low": 0.3
+      },
+      "signals": {
+        "min_conditions_long": 7,
+        "min_conditions_short": 6,
+        "strong_conditions": 7
+      }
+    },
+    "5m": {
+      "thresholds": {
+        "imbalance_long": 0.25,
+        "imbalance_short": -0.25,
+        "delta_long": 100,
+        "delta_short": -100,
+        "vol_ratio_high": 0.9,
+        "vol_ratio_low": 0.35
+      },
+      "signals": {
+        "min_conditions_long": 6,
+        "min_conditions_short": 6,
+        "strong_conditions": 7
+      }
+    },
+    "15m": {
+      "thresholds": {
+        "imbalance_long": 0.35,
+        "imbalance_short": -0.2,
+        "delta_long": 100,
+        "delta_short": -50,
+        "vol_ratio_high": 0.8,
+        "vol_ratio_low": 0.4
+      },
+      "signals": {
+        "min_conditions_long": 6,
+        "min_conditions_short": 4,
+        "strong_conditions": 7
+      }
+    },
+    "1h": {
+      "thresholds": {
+        "imbalance_long": 0.4,
+        "imbalance_short": -0.15,
+        "delta_long": 50,
+        "delta_short": -30,
+        "vol_ratio_high": 0.7,
+        "vol_ratio_low": 0.45
+      },
+      "signals": {
+        "min_conditions_long": 4,
+        "min_conditions_short": 4,
+        "strong_conditions": 6
+      }
+    }
+  }
+}

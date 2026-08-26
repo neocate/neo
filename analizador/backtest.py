@@ -15,7 +15,7 @@ from pathlib import Path
 # PATHS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-SCRIPT_DIR = Path(__file__).parent.parent
+SCRIPT_DIR = Path(__file__).parent
 BASE_DIR = SCRIPT_DIR.parent  # neo/
 VELAS_DIR = BASE_DIR / "velas" / "ETH"
 DATA_DIR = SCRIPT_DIR / "datos"
@@ -420,6 +420,10 @@ def backtest_tf(tf, hours_ahead=1):
     # Mostrar resultados
     df_results = pd.DataFrame(results)
     
+    # Guardar resultados
+    backtest_csv = DATA_DIR / f"eth_backtest_results_{tf}.csv"
+    df_results.to_csv(backtest_csv, index=False)
+    
     print(f"Backtest Results for {tf.upper()} ({hours_ahead}h ahead):")
     print(f"Total trades: {len(df_results)}")
     
@@ -431,10 +435,104 @@ def backtest_tf(tf, hours_ahead=1):
         
         print(f"Win Rate: {win_rate:.1f}%")
         print(f"Avg P&L: {avg_pnl:+.2f} USDT")
-        print(f"Total P&L: {total_pnl:+.2f} USDT\n")
+        print(f"Total P&L: {total_pnl:+.2f} USDT")
+        print(f"Results saved to {backtest_csv}\n")
         return True
     
     return False
+
+def backtest_tf_dynamic(tf, hours_ahead=1, initial_capital=250):
+    """Backtest con capital dinámico - cada trade usa todo el capital disponible"""
+    csv_file = DATA_DIR / f"eth_setup_log_{tf}.csv"
+    
+    if not csv_file.exists():
+        print(f"⚠ No data for {tf}")
+        return False
+    
+    # Cargar análisis
+    try:
+        analysis = pd.read_csv(csv_file)
+        analysis['timestamp'] = pd.to_datetime(analysis['timestamp'])
+    except Exception as e:
+        print(f"❌ Error loading {tf}: {e}")
+        return False
+    
+    price_data = load_price_data()
+    if not price_data:
+        print(f"❌ No price data for {tf}")
+        return False
+    
+    fees = get_fees()
+    capital = initial_capital
+    capital_high = initial_capital
+    trades_executed = 0
+    results = []
+    
+    for _, row in analysis.iterrows():
+        result = evaluate_prediction(row, price_data, hours_ahead=hours_ahead, fees=fees)
+        if result is None or result == 'PENDING':
+            continue
+        
+        # Ejecutar trade con capital dinámico
+        entry_price = result['entry_price']
+        pnl_neto = result['pnl_neto']
+        
+        # Escalar P&L según capital real usado vs 1 lote (2500 USDT)
+        capital_pct = capital / 2500.0
+        pnl_escalado = pnl_neto * capital_pct
+        
+        # Actualizar capital
+        capital += pnl_escalado
+        trades_executed += 1
+        
+        # Track máximo capital
+        if capital > capital_high:
+            capital_high = capital
+        
+        # Registrar trade
+        result['capital_antes'] = capital - pnl_escalado
+        result['capital_despues'] = capital
+        result['pnl_escalado'] = pnl_escalado
+        results.append(result)
+        
+        # Detener si ruina
+        if capital <= 0:
+            print(f"💥 RUINA en trade {trades_executed}: capital = {capital:.2f} USDT")
+            break
+    
+    if not results:
+        print(f"❌ No completed predictions for {tf}")
+        return False
+    
+    # Guardar resultados
+    df_results = pd.DataFrame(results)
+    backtest_csv = DATA_DIR / f"eth_backtest_results_{tf}_dynamic.csv"
+    df_results.to_csv(backtest_csv, index=False)
+    
+    # Estadísticas
+    completed = df_results[df_results['result'].isin(['CORRECT', 'WRONG'])]
+    wins = completed['win'].sum() if len(completed) > 0 else 0
+    
+    print(f"\n{'='*70}")
+    print(f"BACKTEST DINÁMICO: {tf.upper()} ({hours_ahead}h ahead)")
+    print(f"Capital Inicial:   {initial_capital:>10.2f} USDT")
+    print(f"Capital Final:     {capital:>10.2f} USDT ({(capital-initial_capital):+.2f} USDT)")
+    print(f"ROI:               {((capital-initial_capital)/initial_capital*100):>10.1f}%")
+    print(f"Capital Máximo:    {capital_high:>10.2f} USDT")
+    print(f"Máx Reducción:     {(capital_high-capital):>10.2f} USDT")
+    print(f"\nOperaciones:")
+    print(f"Total Trades:      {trades_executed:>10d}")
+    print(f"Completadas:       {len(completed):>10d}")
+    if len(completed) > 0:
+        win_rate = (wins / len(completed)) * 100
+        print(f"Win Rate:          {win_rate:>10.1f}%")
+        print(f"Ganadores:         {wins:>10d}")
+        print(f"Perdedores:        {len(completed) - wins:>10d}")
+        print(f"Avg P&L/Trade:     {completed['pnl_escalado'].mean():>+10.2f} USDT")
+    print(f"\nResultados guardados: {backtest_csv}")
+    print(f"{'='*70}\n")
+    
+    return capital > 0
 
 def main():
     """CLI entry point for backtest"""
@@ -458,28 +556,55 @@ Examples:
                        help='Look ahead hours (default: 1)')
     parser.add_argument('--compare', action='store_true',
                        help='Compare all timeframes')
+    parser.add_argument('--dynamic', action='store_true',
+                       help='Use dynamic capital sizing (250 USDT inicial)')
+    parser.add_argument('--capital', type=float, default=250,
+                       help='Initial capital for dynamic backtest (default: 250)')
     
     args = parser.parse_args()
     
     try:
-        if args.compare:
-            print("\n" + "═" * 70)
-            print("COMPARING ALL TIMEFRAMES")
-            print("═" * 70 + "\n")
+        if args.dynamic:
+            # Backtest dinámico
+            if args.compare:
+                print("\n" + "═" * 70)
+                print(f"BACKTEST DINÁMICO - COMPARAR TFs (Capital: {args.capital} USDT)")
+                print("═" * 70 + "\n")
+                
+                for tf in ['5m', '15m', '1h']:
+                    backtest_tf_dynamic(tf, args.hours, args.capital)
             
-            for tf in ['5m', '15m', '1h']:
-                backtest_tf(tf, args.hours)
-        
-        elif args.tf:
-            backtest_tf(args.tf, args.hours)
+            elif args.tf:
+                backtest_tf_dynamic(args.tf, args.hours, args.capital)
+            
+            else:
+                print("\n" + "═" * 70)
+                print(f"BACKTEST DINÁMICO - TODOS LOS TFs (Capital: {args.capital} USDT)")
+                print("═" * 70 + "\n")
+                
+                for tf in ['5m', '15m', '1h']:
+                    backtest_tf_dynamic(tf, args.hours, args.capital)
         
         else:
-            print("\n" + "═" * 70)
-            print("BACKTEST - ALL AVAILABLE TIMEFRAMES")
-            print("═" * 70 + "\n")
+            # Backtest normal (asume capital infinito)
+            if args.compare:
+                print("\n" + "═" * 70)
+                print("COMPARING ALL TIMEFRAMES")
+                print("═" * 70 + "\n")
+                
+                for tf in ['5m', '15m', '1h']:
+                    backtest_tf(tf, args.hours)
             
-            for tf in ['5m', '15m', '1h']:
-                backtest_tf(tf, args.hours)
+            elif args.tf:
+                backtest_tf(args.tf, args.hours)
+            
+            else:
+                print("\n" + "═" * 70)
+                print("BACKTEST - ALL AVAILABLE TIMEFRAMES")
+                print("═" * 70 + "\n")
+                
+                for tf in ['5m', '15m', '1h']:
+                    backtest_tf(tf, args.hours)
     
     except Exception as e:
         logger.error(f"Fatal error: {e}")

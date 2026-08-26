@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 
-BASE_DIR = Path(__file__).parent.parent.parent  # neo/
+BASE_DIR = Path(__file__).parent.parent  # neo/
 VELAS_DIR = BASE_DIR / "velas" / "ETH"
 NIVELES_DIR = BASE_DIR / "niveles" / "json"
 DATA_DIR = BASE_DIR / "analizador" / "datos"

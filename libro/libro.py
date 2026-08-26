@@ -1,7 +1,9 @@
 # ---------------------------------------------------------------
 # libro.py
 #
-# Graba datos irrecuperables: CVD, volumen compra/venta, libro de órdenes.
+# Graba datos irrecuperables: CVD, volumen compra/venta, libro de órdenes,
+# y ahora tambien el detalle de ejecuciones con precio y timestamp de exchange.
+#
 # Estos datos NO están disponibles en históricos del exchange.
 #
 # Autonomo a proposito: no importa nada de mercado/ ni del resto del proyecto.
@@ -12,52 +14,65 @@
 #   Monedas: btc,eth,sol (default: btc,eth)
 #   Opciones:
 #     --cada N           segundos entre capturas (default: 15)
+#                        Resolucion minima usable: 5 minutos
+#                        Abajo de eso, vol_buy/vol_sell tienen error ±45%
 #     --profundidad N    niveles del libro (default: 100)
 #                        Bitget solo admite 1, 5, 15, 50, 100: cualquier otro
 #                        valor lo ignora y devuelve 100.
 #     --funding-cada N   segundos entre updates funding (default: 300)
+#                        Resolucion: ≥5 min. Congelado entre updates.
 #     --ls-ratio-cada N  segundos entre updates L/S ratio (default: 300)
+#                        Resolucion: ≥1h. Endpoint del exchange es horario.
 #
 # Ejemplos:
 #   python libro/libro.py
-#   python libro/libro.py btc,eth --cada 10
-#   python libro/libro.py btc,eth,icp --profundidad 50 --cada 5
+#   python libro/libro.py btc,eth --cada 300
+#   python libro/libro.py btc,eth,icp --profundidad 50 --cada 60
 #
-# CSV contiene:
-#   timestamp_local_ms: cuando se capturó (máquina local)
-#   timestamp_exchange_ms: cuando se capturó (exchange, si disponible)
-#   estado: 'ok' o 'error_libro' si fallo
-#   bids_json, asks_json: libro completo en cada fila
-#   cvd: acumulativo intra-sesión, se resetea solo en reinicio explícito
+# Ficheros de salida:
 #
-# OJO con la fecha del nombre del CSV: libro_20260821_ETH.csv NO significa
-# "datos del 21". El nombre se calcula UNA vez, al arrancar, asi que indica
-# DESDE CUANDO CORRE ESE PROCESO, no de que dia son las filas. Una instancia
-# lanzada el dia 20 sigue escribiendo en libro_20260820_ETH.csv toda la noche
-# y todo el dia siguiente hasta que la pares: no rota a medianoche. Para saber
-# de que dia es cada fila, mirar la columna fecha_utc, nunca el nombre.
+#   libro_<coin>_<mercado>_YYYYMMDD.csv
+#     Snapshots del libro, CVD, volumen compra/venta cada N segundos.
+#     ROTA A MEDIANOCHE UTC. El nombre es libro_eth_futuros_20260821.csv
+#     si corre en ese dia UTC.
 #
-# Arranque en el NAS (Linux, por SSH):
+#     Columnas:
+#       timestamp_local_ms: cuando se capturó (máquina local)
+#       timestamp_exchange_ms: cuando se capturó (exchange, si disponible)
+#       fecha_utc: fecha y hora UTC de la captura
+#       estado: 'ok' o 'error_libro' si fallo
+#       coin: moneda
+#       imbalance, imbalance_niveles: desequilibrio del libro en [-1,+1]
+#       open_interest, funding_rate_pct, long_short_ratio: metadata del exchange
+#       n_trades, vol_buy, vol_sell, delta_vol, cvd: acumulativo desde arranque
+#       session_id: timestamp de inicio de este proceso (identifica cadena CVD)
+#       bids_json, asks_json: snapshot del libro completo
 #
-#   Primera vez:
-#     python -m venv venv
-#     source venv/bin/activate
-#     python -m pip install -r requirements.txt
+#   libro_trades_<coin>_<mercado>_YYYYMMDD.csv
+#     Detalle granular de cada trade capturado, para reconstruir volume profile.
+#     ROTA A MEDIANOCHE UTC como el libro.
 #
-#   Uso diario, desde la raiz del proyecto (neo/):
-#     ps -ef | grep "libro/libro.py" | grep -v grep
-#     nohup venv/bin/python -u libro/libro.py eth >/dev/null 2>&1 &
-#     tail -f libro/logs/libro_ETH.log
-#     kill -INT <PID>
+#     Columnas:
+#       timestamp_exchange_ms: cuando se ejecuto el trade (exchange)
+#       timestamp_local_ms: cuando se capturó (máquina local)
+#       fecha_utc: fecha UTC del trade
+#       precio: precio de ejecución
+#       volumen: tamaño del trade
+#       lado: 'buy' o 'sell'
+#       coin: moneda
 #
-#   El >/dev/null evita el nohup.out, que solo duplicaria el fichero de log.
-#   Parar con -INT y no con SIGTERM: el script solo captura KeyboardInterrupt,
-#   que es lo que libera el lock, cierra el CSV y deja escrito "Parado por el
-#   usuario" en el log. Con pkill a secas esa traza no aparece y luego no
-#   distingues una parada tuya de una caida.
-#   Matar por PID y no con pkill -f: pueden convivir varias instancias (el lock
-#   es por fichero CSV, o sea por juego de monedas), y un pkill se las lleva
-#   todas por delante.
+# Limitaciones conocidas:
+#   - CVD se reinicia a 0 en cada arranque de este proceso, sin marca historica.
+#   - vol_buy/vol_sell/delta_vol tienen error ±45% a resolución <5 min,
+#     porque se asignan por timestamp de poll, no de ejecución de trade.
+#   - funding_rate_pct se actualiza cada 300+ s (congelado entre updates).
+#   - long_short_ratio es horario (endpoint Bitget es de resolucion 1h).
+#   - Se pierden ~5,9% del volumen entre polls — lag de paginacion en el exchange.
+#
+# Parada segura (libera locks, cierra CSVs, registra marca):
+#   kill -INT <PID>   (no pkill -f, que mata todas las instancias)
+#   o en Linux/Mac: Ctrl-C
+#
 # ---------------------------------------------------------------
 
 import csv
@@ -66,7 +81,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import platform
 
 import ccxt
@@ -86,8 +101,13 @@ CAMPOS_CSV = [
     "timestamp_local_ms", "fecha_utc", "timestamp_exchange_ms", "estado", "coin",
     "imbalance", "imbalance_niveles",
     "open_interest", "funding_rate_pct", "long_short_ratio",
-    "n_trades", "vol_buy", "vol_sell", "delta_vol", "cvd",
+    "n_trades", "vol_buy", "vol_sell", "delta_vol", "cvd", "session_id",
     "bids_json", "asks_json",
+]
+
+CAMPOS_TRADES = [
+    "timestamp_exchange_ms", "timestamp_local_ms", "fecha_utc",
+    "precio", "volumen", "lado", "coin",
 ]
 
 # Alertas de integridad
@@ -222,10 +242,10 @@ def _crear_estructura():
             open(gitkeep, "a").close()
 
 
-def _configurar_logging(coins):
-    """Configura logging para escribir en logs/libro_MONEDAS.log"""
+def _configurar_logging(coins, mercado):
+    """Configura logging para escribir en logs/libro_MONEDAS_MERCADO.log"""
     monedas_str = "-".join(c.upper() for c in coins)
-    log_file = os.path.join(DIR_LOGS, f"libro_{monedas_str}.log")
+    log_file = os.path.join(DIR_LOGS, f"libro_{monedas_str}_{mercado}.log")
 
     logger = logging.getLogger("libro")
     logger.setLevel(logging.INFO)
@@ -249,18 +269,24 @@ def _configurar_logging(coins):
     return logger
 
 
-def _archivo(coins):
+def _archivo(coins, mercado, es_trades=False):
+    """Genera ruta con rotacion diaria a medianoche UTC.
+
+    Formato: libro_<coin>_<mercado>_YYYYMMDD.csv (para snapshots)
+    o:       libro_trades_<coin>_<mercado>_YYYYMMDD.csv (para trades granulares)
+    """
     fecha = datetime.now(timezone.utc).strftime("%Y%m%d")
-    monedas = "-".join(c.upper() for c in coins)
-    return os.path.join(DIR_DATOS, f"libro_{fecha}_{monedas}.csv")
+    moneda = coins[0].upper()  # una sola moneda por fichero
+    prefijo = "libro_trades" if es_trades else "libro"
+    return os.path.join(DIR_DATOS, f"{prefijo}_{moneda}_{mercado}_{fecha}.csv")
 
 
-def _ruta_compatible(ruta, logger):
+def _ruta_compatible(ruta, campos_esperados, logger):
     if not os.path.exists(ruta):
         return ruta
     with open(ruta, newline="", encoding="utf-8") as f:
         primera = f.readline().strip()
-    if primera == ",".join(CAMPOS_CSV):
+    if primera == ",".join(campos_esperados):
         return ruta
     base, ext = os.path.splitext(ruta)
     n = 2
@@ -343,7 +369,7 @@ def _avanzar_cursor(estado, lote):
 def _trade_flow(coin, simbolo, cache, logger):
     estado = cache.setdefault(coin, {
         "cursor": None, "ids_cursor": set(), "cvd": 0.0,
-        "iniciado": False, "sin_trades": 0,
+        "iniciado": False, "sin_trades": 0, "trades": [],
     })
 
     # Primera pasada: solo fija el punto de partida, no contabiliza nada.
@@ -352,16 +378,17 @@ def _trade_flow(coin, simbolo, cache, logger):
             lote = _ex_trades(simbolo, limite=TRADES_LIMITE)
         except Exception as e:
             logger.warning(f"trades {coin}: {e}")
-            return 0, 0.0, 0.0, estado["cvd"]
+            return 0, 0.0, 0.0, estado["cvd"], []
         estado["iniciado"] = True
         if lote:
             _avanzar_cursor(estado, lote)
         logger.info(f"CVD arranca en 0.0 para {coin} (cursor={estado['cursor']})")
-        return 0, 0.0, 0.0, estado["cvd"]
+        return 0, 0.0, 0.0, estado["cvd"], []
 
     n = 0
     vb = vs = 0.0
     paginas = 0
+    trades_nuevos = []
 
     while paginas < MAX_PAGINAS_TRADES:
         try:
@@ -375,10 +402,23 @@ def _trade_flow(coin, simbolo, cache, logger):
         for t in nuevos:
             amt = t.get("amount") or 0.0
             lado = t.get("side")
+            ts_exchange = t.get("timestamp")
+            precio = t.get("price")
+
             if lado == "buy":
                 vb += amt
             elif lado == "sell":
                 vs += amt
+
+            # Guardar para CSV de trades
+            if ts_exchange is not None and precio is not None:
+                trades_nuevos.append({
+                    "ts_exchange": ts_exchange,
+                    "precio": precio,
+                    "volumen": amt,
+                    "lado": lado,
+                })
+
         n += len(nuevos)
         if nuevos:
             _avanzar_cursor(estado, nuevos)
@@ -400,6 +440,7 @@ def _trade_flow(coin, simbolo, cache, logger):
         logger.warning(f"trades {coin}: {paginas} paginas para {n} trades - actividad alta")
 
     estado["cvd"] += vb - vs
+    estado["trades"] = trades_nuevos
 
     # Detectar período sin trades
     if n == 0:
@@ -409,7 +450,7 @@ def _trade_flow(coin, simbolo, cache, logger):
     else:
         estado["sin_trades"] = 0
 
-    return n, vb, vs, estado["cvd"]
+    return n, vb, vs, estado["cvd"], trades_nuevos
 
 
 def _aplicar_lock(arch, logger):
@@ -437,7 +478,7 @@ def _liberar_lock(arch):
 
 
 def _fila(coin, simbolo, profundidad, funding_cache, funding_cada,
-          ls_ratio_cache, ls_ratio_cada, trade_cache, logger):
+          ls_ratio_cache, ls_ratio_cada, trade_cache, session_id, logger):
     ahora = datetime.now(timezone.utc)
     timestamp_local_ms = int(ahora.timestamp() * 1000)
     estado = "ok"
@@ -458,7 +499,7 @@ def _fila(coin, simbolo, profundidad, funding_cache, funding_cada,
 
     funding = _funding_pct(coin, simbolo, funding_cache, funding_cada, logger)
     ls_ratio = _ls_ratio(coin, simbolo, ls_ratio_cache, ls_ratio_cada, logger)
-    n_trades, vol_buy, vol_sell, cvd = _trade_flow(coin, simbolo, trade_cache, logger)
+    n_trades, vol_buy, vol_sell, cvd, trades = _trade_flow(coin, simbolo, trade_cache, logger)
 
     bids = None
     asks = None
@@ -473,8 +514,8 @@ def _fila(coin, simbolo, profundidad, funding_cache, funding_cada,
         "timestamp_exchange_ms": timestamp_exchange_ms if timestamp_exchange_ms is not None else "",
         "estado": estado,
         "coin": coin,
-        "imbalance": _imbalance(libro, niveles=10) if libro else "",
-        "imbalance_niveles": 10,
+        "imbalance": _imbalance(libro, niveles=profundidad) if libro else "",
+        "imbalance_niveles": profundidad,
         "open_interest": oi if oi is not None else "",
         "funding_rate_pct": funding if funding is not None else "",
         "long_short_ratio": ls_ratio if ls_ratio is not None else "",
@@ -483,22 +524,29 @@ def _fila(coin, simbolo, profundidad, funding_cache, funding_cada,
         "vol_sell": round(vol_sell, 6),
         "delta_vol": round(vol_buy - vol_sell, 6),
         "cvd": round(cvd, 6),
+        "session_id": session_id,
         "bids_json": json.dumps(bids) if bids else "",
         "asks_json": json.dumps(asks) if asks else "",
-    }
+    }, trades
 
 
 def main():
     _crear_estructura()
 
     args = sys.argv[1:]
+    coins = []
+    mercado = "futuros"
+
     if args and not args[0].startswith("--"):
         coins = [c.strip().upper() for c in args[0].split(",")]
         args = args[1:]
-    else:
+
+    if not coins:
         coins = ["BTC", "ETH"]
 
-    logger = _configurar_logging(coins)
+    # Moneda es singular, pero agrupa todas las monedas en un fichero por ahora
+    # Si hay varias, el primero es el nombre (compatible hacia atrás)
+    logger = _configurar_logging(coins, mercado)
 
     cada = 15.0
     profundidad = 100
@@ -518,6 +566,9 @@ def main():
         elif args[i] == "--ls-ratio-cada":
             i += 1
             ls_ratio_cada = float(args[i])
+        elif args[i] == "--mercado":
+            i += 1
+            mercado = args[i]
         i += 1
 
     if profundidad not in PROFUNDIDADES_VALIDAS:
@@ -527,33 +578,97 @@ def main():
             f"el exchange lo ignorara y devolvera 100 niveles"
         )
 
+    if cada < 300:
+        logger.warning(
+            f"--cada {cada:.0f}s es menor que 5 min: vol_buy/vol_sell tendran error ±45%. "
+            f"Se recomienda ≥300s para datos confiables."
+        )
+
     simbolos = {c: _ex_simbolo(c) for c in coins}
-    ruta = _ruta_compatible(_archivo(coins), logger)
-    nuevo = not os.path.exists(ruta)
-    arch = open(ruta, "a", newline="")
+    session_id = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-    _aplicar_lock(arch, logger)
+    # Archivos snapshots y trades - se rotan en bucle si cambia la fecha
+    ruta_snapshot = _archivo(coins, mercado, es_trades=False)
+    ruta_trades = _archivo(coins, mercado, es_trades=True)
+    ruta_snapshot = _ruta_compatible(ruta_snapshot, CAMPOS_CSV, logger)
+    ruta_trades = _ruta_compatible(ruta_trades, CAMPOS_TRADES, logger)
 
-    writer = csv.DictWriter(arch, fieldnames=CAMPOS_CSV)
-    if nuevo:
-        writer.writeheader()
-        arch.flush()
+    nuevo_snapshot = not os.path.exists(ruta_snapshot)
+    nuevo_trades = not os.path.exists(ruta_trades)
 
-    logger.info(f"Grabando {', '.join(coins)} cada {cada:.0f}s (profundidad {profundidad}) -> {ruta}")
+    arch_snapshot = open(ruta_snapshot, "a", newline="")
+    arch_trades = open(ruta_trades, "a", newline="")
+
+    _aplicar_lock(arch_snapshot, logger)
+
+    writer_snapshot = csv.DictWriter(arch_snapshot, fieldnames=CAMPOS_CSV)
+    writer_trades = csv.DictWriter(arch_trades, fieldnames=CAMPOS_TRADES)
+
+    if nuevo_snapshot:
+        writer_snapshot.writeheader()
+        arch_snapshot.flush()
+    if nuevo_trades:
+        writer_trades.writeheader()
+        arch_trades.flush()
+
+    logger.info(f"Grabando {', '.join(coins)} cada {cada:.0f}s (profundidad {profundidad}) mercado={mercado}")
+    logger.info(f"  Snapshots -> {ruta_snapshot}")
+    logger.info(f"  Trades    -> {ruta_trades}")
+    logger.info(f"  Session ID: {session_id} (identifica esta cadena de CVD)")
     logger.info(f"Funding cada {funding_cada:.0f}s, long/short ratio cada {ls_ratio_cada:.0f}s")
     logger.info(f"Trades: hasta {TRADES_LIMITE} por peticion, max {MAX_PAGINAS_TRADES} paginas por ciclo")
-    logger.info(f"Alertas: gap máximo {MAX_GAP_SEGUNDOS}s, sin trades límite {ALERTAR_SI_NO_TRADES}")
 
     funding_cache = {}
     ls_ratio_cache = {}
     trade_cache = {}
     timestamp_previo = None
+    fecha_previo = None
 
     try:
         while True:
+            ahora_utc = datetime.now(timezone.utc)
+            fecha_hoy = ahora_utc.strftime("%Y%m%d")
+
+            # Rotar ficheros si cambio la fecha UTC
+            if fecha_previo is not None and fecha_hoy != fecha_previo:
+                logger.info(f"ROTACION: Cambio de dia UTC ({fecha_previo} -> {fecha_hoy})")
+                _liberar_lock(arch_snapshot)
+                arch_snapshot.close()
+                arch_trades.close()
+
+                ruta_snapshot = _archivo(coins, mercado, es_trades=False)
+                ruta_trades = _archivo(coins, mercado, es_trades=True)
+                ruta_snapshot = _ruta_compatible(ruta_snapshot, CAMPOS_CSV, logger)
+                ruta_trades = _ruta_compatible(ruta_trades, CAMPOS_TRADES, logger)
+
+                nuevo_snapshot = not os.path.exists(ruta_snapshot)
+                nuevo_trades = not os.path.exists(ruta_trades)
+
+                arch_snapshot = open(ruta_snapshot, "a", newline="")
+                arch_trades = open(ruta_trades, "a", newline="")
+                _aplicar_lock(arch_snapshot, logger)
+
+                writer_snapshot = csv.DictWriter(arch_snapshot, fieldnames=CAMPOS_CSV)
+                writer_trades = csv.DictWriter(arch_trades, fieldnames=CAMPOS_TRADES)
+
+                if nuevo_snapshot:
+                    writer_snapshot.writeheader()
+                if nuevo_trades:
+                    writer_trades.writeheader()
+
+                logger.info(f"  Snapshots -> {ruta_snapshot}")
+                logger.info(f"  Trades    -> {ruta_trades}")
+
+                # Reinicia CVD para la nueva sesion
+                session_id = int(datetime.now(timezone.utc).timestamp() * 1000)
+                logger.info(f"[CVD RESET] Nuevo session_id={session_id}")
+                trade_cache.clear()
+
+            fecha_previo = fecha_hoy
+
             for coin in coins:
-                fila = _fila(coin, simbolos[coin], profundidad, funding_cache, funding_cada,
-                             ls_ratio_cache, ls_ratio_cada, trade_cache, logger)
+                fila, trades = _fila(coin, simbolos[coin], profundidad, funding_cache, funding_cada,
+                                      ls_ratio_cache, ls_ratio_cada, trade_cache, session_id, logger)
 
                 # Validar gap temporal
                 ts_actual = fila["timestamp_local_ms"]
@@ -561,17 +676,35 @@ def main():
                     gap_ms = ts_actual - timestamp_previo
                     gap_s = gap_ms / 1000.0
                     if gap_s > MAX_GAP_SEGUNDOS:
-                        logger.error(f"⚠️ GAP DETECTADO: {gap_s:.1f}s entre registros (esperado: {cada:.0f}s) - posible downtime")
+                        logger.error(f"GAP DETECTADO: {gap_s:.1f}s entre registros (esperado: {cada:.0f}s) - posible downtime")
                 timestamp_previo = ts_actual
 
-                writer.writerow(fila)
-                arch.flush()
+                writer_snapshot.writerow(fila)
+                arch_snapshot.flush()
+
+                # Guardar trades granulares
+                ts_local = int(datetime.now(timezone.utc).timestamp() * 1000)
+                fecha_utc = datetime.fromtimestamp(ts_local / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                for t in trades:
+                    writer_trades.writerow({
+                        "timestamp_exchange_ms": t["ts_exchange"],
+                        "timestamp_local_ms": ts_local,
+                        "fecha_utc": fecha_utc,
+                        "precio": round(t["precio"], 2),
+                        "volumen": round(t["volumen"], 6),
+                        "lado": t["lado"],
+                        "coin": coin,
+                    })
+                if trades:
+                    arch_trades.flush()
+
             time.sleep(cada)
     except KeyboardInterrupt:
         logger.info("Parado por el usuario.")
     finally:
-        _liberar_lock(arch)
-        arch.close()
+        _liberar_lock(arch_snapshot)
+        arch_snapshot.close()
+        arch_trades.close()
 
 
 if __name__ == "__main__":

@@ -1,14 +1,35 @@
 # ================================================================================
 # velas_bit.py
 #
-# Maquinaria comun de descarga de velas OHLCV (futuros USDT-M) de Bitget.
-# NO se ejecuta: es la libreria que usan los dos frontales.
+# Maquinaria comun de descarga de velas OHLCV de Bitget.
+# NO se ejecuta, y NO se importa directamente: es la libreria que hay detras
+# de los dos modulos de mercado, que son los que fijan QUE se descarga.
 #
-#   descargar_bit.py       produccion - mantiene el CSV al dia, --loop
-#   descargar_hist_bit.py  recoleccion - baja el historial completo, 2-3 veces
+#   velas_bit_spot.py      -> ETH/USDT      (mercado al contado)
+#   velas_bit_futuros.py   -> ETH/USDT:USDT (perpetuo USDT-M)
 #
-# Los dos comparten CSV, lock y log, asi que se bloquean entre si sobre la
-# misma moneda+TF y conviven sobre TF distintos.
+# Y los frontales, uno por mercado:
+#
+#   descargar_bit_spot.py / descargar_bit_futuros.py
+#       produccion - mantienen el CSV al dia, --loop
+#   descargar_hist_bit_spot.py / descargar_hist_bit_futuros.py
+#       recoleccion - bajan el historial completo, 2-3 veces
+#
+# EL MERCADO NUNCA SE DEDUCE. Es un argumento obligatorio de toda la API
+# publica de este fichero. La razon esta en el historial: el simbolo 'ETHUSDT'
+# es el id de DOS mercados de Bitget a la vez (spot y swap), y ccxt lo resolvia
+# al que dijese defaultType, que por defecto es spot. Durante meses se bajaron
+# velas de spot creyendo que eran de futuros. Se separan 5 pb, asi que ningun
+# control de precios lo habria visto. De ahi que aqui los simbolos sean
+# siempre explicitos ('ETH/USDT' vs 'ETH/USDT:USDT'), que el mercado vaya en
+# el nombre de CSV, lock y log, y que ademas quede escrito DENTRO del .meta
+# que acompaña a cada CSV: el nombre de un fichero se puede equivocar al
+# copiarlo entre equipos, el .meta viaja con el y se comprueba antes de
+# escribir un solo byte.
+#
+# Los dos frontales de un mismo mercado comparten CSV, lock y log, asi que se
+# bloquean entre si sobre la misma moneda+TF+mercado y conviven sobre TF
+# distintos. Spot y futuros no se bloquean entre si: son series distintas.
 #
 # NOMENCLATURA (la usada en todo el fichero):
 #   actual    -> vela EN CURSO, abierta ahora mismo. Nunca se guarda.
@@ -22,10 +43,17 @@
 # ALMACENAMIENTO (relativo a esta carpeta - identico en Windows y Linux).
 # La base se resuelve en cada arranque: si mueves o copias el arbol (neo,
 # neo_prueba, neo_copia...) se autoajusta.
-#   velas/[COIN]/bitget_[COIN]_[TF].csv    <- historial (solo velas cerradas)
-#   velas/lock/[COIN]_[TF].lock            <- un proceso por moneda+TF
-#   velas/log/[COIN]_[TF].log              <- append, nunca pisa lo anterior
+#   velas/[COIN]/bitget_[COIN]_[TF]_[MERCADO].csv   <- historial (velas cerradas)
+#   velas/[COIN]/bitget_[COIN]_[TF]_[MERCADO].meta  <- de que mercado es ese CSV
+#   velas/lock/[COIN]_[TF]_[MERCADO].lock  <- un proceso por moneda+TF+mercado
+#   velas/log/[COIN]_[TF]_[MERCADO].log    <- append, nunca pisa lo anterior
 # Las carpetas se crean solas.
+#
+# HORAS: todo en UTC, sin excepcion. La columna de fecha del CSV, los logs y
+# los relojes de vela. Las velas del exchange se alinean a fronteras UTC (la
+# diaria cierra a las 00:00 UTC), asi que cualquier conversion a hora local
+# solo añadiria ambiguedad -dos veces al año la hora local se repite o se
+# salta- sin ganar nada. El 'timestamp' en ms es la fuente de verdad.
 #
 # DOS ENDPOINTS (se elige solo, ver _endpoint)
 #   Bitget sirve las velas por dos vias y no son intercambiables:
@@ -47,12 +75,22 @@
 #                 -> se DESCARTA lo anterior y el historial arranca despues
 #                 del hueco: sin continuidad los datos no valen para
 #                 analisis.
+#   F4 CONFIRMA   una vela recien cerrada NO esta sellada. Bitget sigue
+#                 consolidandola unos segundos: leida a +1s, el 27% de las 3m
+#                 y el 80% de las 1d salian con un close que despues cambiaba,
+#                 y como el CSV es append-only ese valor falso se quedaba para
+#                 siempre. Medido, los cambios se consolidan entre +5 y +8s.
+#                 Asi que no se guarda al cerrar: se pide dos veces separadas
+#                 CONFIRMA_SEG y solo se guarda si las dos lecturas coinciden.
+#                 Si no coinciden no se guarda nada y no pasa nada: la pasada
+#                 siguiente la vera como 'falta 1 vela' y la pedira ya sellada.
 #   F5 REANUDA    se escribe por lotes ya verificados, asi que un corte deja
 #                 el CSV mas corto pero SIEMPRE continuo, y reanudable.
 #   F6 LIBRERIA   vela_actual() y ultimas_velas(), sin tocar disco.
 # ================================================================================
 
 import csv
+import json
 import os
 import sys
 import time
@@ -65,12 +103,35 @@ TIMEFRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d']
 TF_SEGUNDOS = {'1m': 60, '3m': 180, '5m': 300, '15m': 900,
                '30m': 1800, '1h': 3600, '4h': 14400, '1d': 86400}
 
+# Los dos mercados, con su plantilla de simbolo ccxt. Explicitos a proposito:
+# el id corto ('ETHUSDT') es ambiguo entre ambos y lo resuelve defaultType,
+# que es justo como se acabaron bajando velas de spot creyendolas de futuros.
+MERCADOS = {
+    'spot':    '{}/USDT',        # ETH/USDT
+    'futuros': '{}/USDT:USDT',   # ETH/USDT:USDT (perpetuo USDT-M)
+}
+
 # Base = carpeta de este fichero, resuelta en cada arranque.
 DIR_VELAS = Path(__file__).resolve().parent
 DIR_LOCK = DIR_VELAS / 'lock'
 DIR_LOG = DIR_VELAS / 'log'
 
 CABECERA = ['timestamp', 'fecha_utc', 'open', 'high', 'low', 'close', 'volumen']
+
+# F4: margen tras el cierre antes de mirar la vela, y separacion entre las dos
+# lecturas que tienen que coincidir para darla por sellada. Los 15s son casi
+# el doble del peor caso medido (+8,2s); la doble lectura esta ademas para no
+# depender de que esa medida siga siendo valida el dia de mañana.
+MARGEN_CIERRE = 15       # segundos desde el cierre hasta la primera lectura
+CONFIRMA_SEG = 5         # separacion entre las dos lecturas que deben coincidir
+
+# Punto de arranque cuando no hay CSV: ventana en dias que se baja por TF.
+# Solo se aplica en el arranque en frio de un equipo nuevo. Una vez que hay
+# CSV, descargar_bit continua desde la ultima vela guardada, sin importar esto.
+ORIGEN_DIAS = {
+    '1m': 7, '3m': 20, '5m': 30, '15m': 90,
+    '30m': 180, '1h': 365, '4h': 1095, '1d': None
+}
 
 MS_DIA = 86_400_000
 MAX_RECIENTE = 1000      # tope de velas/peticion del endpoint reciente
@@ -103,9 +164,23 @@ def _extraer_moneda(coin):
     return coin
 
 
-def _simbolo(coin):
-    """'eth' -> 'ETHUSDT' (simbolo Bitget futuros USDT-M)."""
-    return f"{_extraer_moneda(coin)}USDT"
+def _validar_mercado(mercado):
+    """El mercado es obligatorio y solo puede ser uno de los dos. Sin defecto
+    a proposito: un defecto aqui es exactamente como se cuela el mercado
+    equivocado sin que nadie se entere."""
+    if mercado not in MERCADOS:
+        raise ValueError(
+            f"mercado invalido: {mercado!r}. Usa: {', '.join(MERCADOS)}")
+    return mercado
+
+
+def _simbolo(coin, mercado):
+    """('eth','spot') -> 'ETH/USDT'; ('eth','futuros') -> 'ETH/USDT:USDT'.
+
+    Simbolo ccxt completo, nunca el id corto: 'ETHUSDT' es el id de los dos
+    mercados y ccxt lo desempata con defaultType, que no es de fiar."""
+    _validar_mercado(mercado)
+    return MERCADOS[mercado].format(_extraer_moneda(coin))
 
 
 def _asegurar_dir(ruta):
@@ -131,9 +206,74 @@ def _dir_coin(coin):
     return _asegurar_dir(DIR_VELAS / _extraer_moneda(coin))
 
 
-def _archivo(coin, timeframe):
+def _archivo(coin, timeframe, mercado):
     """Ruta del CSV de historial. Crea la carpeta de la moneda si falta."""
-    return _dir_coin(coin) / f"bitget_{_extraer_moneda(coin)}_{timeframe}.csv"
+    _validar_mercado(mercado)
+    return (_dir_coin(coin) /
+            f"bitget_{_extraer_moneda(coin)}_{timeframe}_{mercado}.csv")
+
+
+def _ruta_meta(ruta_csv):
+    """El .meta que acompaña a un CSV: mismo nombre, otra extension."""
+    return Path(ruta_csv).with_suffix('.meta')
+
+
+def _escribir_meta(ruta_csv, coin, timeframe, mercado):
+    """Deja al lado del CSV de que mercado son sus velas.
+
+    El nombre del fichero ya lo dice, pero un nombre se equivoca al copiarlo
+    entre equipos y nadie se entera: _validar_lote solo mira la continuidad de
+    los timestamps, jamas los precios, asi que velas de perp anexadas detras
+    de velas de spot pasan todos los controles sin un aviso. Y no vale mirar
+    el precio para detectarlo: spot y perp se separan 5 pb.
+    """
+    datos = {
+        'exchange': 'bitget',
+        'mercado': mercado,
+        'simbolo': _simbolo(coin, mercado),
+        'coin': _extraer_moneda(coin),
+        'tf': timeframe,
+        'creado': f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ}",
+    }
+    try:
+        _ruta_meta(ruta_csv).write_text(
+            json.dumps(datos, indent=1) + '\n', encoding='utf-8')
+    except OSError as e:
+        print(f"  [AVISO] no se pudo escribir el .meta: {e}", flush=True)
+
+
+def _comprobar_meta(ruta_csv, coin, timeframe, mercado):
+    """Se llama ANTES de escribir nada. Aborta si el CSV no es de este
+    mercado, o si no hay forma de saberlo.
+
+    Un CSV sin .meta no se toca: puede ser de cualquiera de los dos mercados
+    y no hay manera de averiguarlo mirando los numeros. Si llego por FTP sin
+    su .meta, la ausencia ES la alarma - se declara a mano y ya.
+    """
+    ruta_csv = Path(ruta_csv)
+    if not ruta_csv.exists() or ruta_csv.stat().st_size == 0:
+        return                                   # CSV nuevo: lo crea _crear_csv
+    meta = _ruta_meta(ruta_csv)
+    if not meta.exists():
+        raise RuntimeError(
+            f"[META] {ruta_csv.name} no tiene .meta al lado: no hay forma de\n"
+            f"       saber de que mercado son sus velas y no se va a tocar.\n"
+            f"       Si sabes que es de '{mercado}', crea {meta.name} con:\n"
+            f'       {{"exchange": "bitget", "mercado": "{mercado}", '
+            f'"coin": "{_extraer_moneda(coin)}", "tf": "{timeframe}"}}')
+    try:
+        datos = json.loads(meta.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"[META] {meta.name} ilegible: {e}")
+    for campo, esperado in (('mercado', mercado),
+                            ('coin', _extraer_moneda(coin)),
+                            ('tf', timeframe)):
+        if datos.get(campo) != esperado:
+            raise RuntimeError(
+                f"[META] {ruta_csv.name} dice {campo}={datos.get(campo)!r} "
+                f"pero este proceso es {campo}={esperado!r}.\n"
+                f"       No se escribe nada: mezclar dos series en un CSV lo "
+                f"invalida entero y no hay forma de separarlas despues.")
 
 
 # Nombre publico de _archivo: es lo que consumen los ficheros de fuera
@@ -143,21 +283,29 @@ def _archivo(coin, timeframe):
 ruta_csv = _archivo
 
 
-def _ruta_lock(coin, timeframe):
-    return _asegurar_dir(DIR_LOCK) / f"{_extraer_moneda(coin)}_{timeframe}.lock"
+def _ruta_lock(coin, timeframe, mercado):
+    _validar_mercado(mercado)
+    return (_asegurar_dir(DIR_LOCK) /
+            f"{_extraer_moneda(coin)}_{timeframe}_{mercado}.lock")
 
 
-def _ruta_log(coin, timeframe):
-    return _asegurar_dir(DIR_LOG) / f"{_extraer_moneda(coin)}_{timeframe}.log"
+def _ruta_log(coin, timeframe, mercado):
+    _validar_mercado(mercado)
+    return (_asegurar_dir(DIR_LOG) /
+            f"{_extraer_moneda(coin)}_{timeframe}_{mercado}.log")
 
 
-def _log(coin, timeframe, mensaje, consola=True):
-    """Escribe en el log de esa moneda+TF. SIEMPRE en append: relanzar el
-    mismo comando mil veces nunca pisa lo anterior."""
+def _log(coin, timeframe, mercado, mensaje, consola=True):
+    """Escribe en el log de esa moneda+TF+mercado. SIEMPRE en append:
+    relanzar el mismo comando mil veces nunca pisa lo anterior.
+
+    La marca de tiempo va en UTC, igual que la columna de fecha del CSV: asi
+    una linea del log y una vela se cruzan sin conversiones de por medio.
+    """
     if consola:
         print(f"  {mensaje}", flush=True)
     try:
-        with open(_ruta_log(coin, timeframe), 'a', encoding='utf-8') as f:
+        with open(_ruta_log(coin, timeframe, mercado), 'a', encoding='utf-8') as f:
             f.write(f"[{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S}] {mensaje}\n")
     except OSError as e:
         print(f"  [AVISO] no se pudo escribir el log: {e}", flush=True)
@@ -211,8 +359,10 @@ def _pid_vivo(pid):
 
 
 class Lock:
-    """Un proceso por moneda+TF. Es el CSV lo que se corrompe, asi que esa
-    es la unidad: 'eth 1h' y 'eth 4h' pueden convivir, dos 'eth 1h' no.
+    """Un proceso por moneda+TF+mercado. Es el CSV lo que se corrompe, asi que
+    esa es la unidad: 'eth 1h spot' y 'eth 4h spot' pueden convivir, y
+    'eth 1h spot' con 'eth 1h futuros' tambien -son CSV distintos-, pero dos
+    'eth 1h spot' no.
 
     Sin esto, dos procesos sobre el mismo CSV se destrozan entre si: uno lo
     abre en 'w' (vacia el fichero y escribe desde el principio) mientras el
@@ -225,10 +375,11 @@ class Lock:
     - Reentrante dentro del mismo proceso.
     """
 
-    def __init__(self, coin, timeframe):
+    def __init__(self, coin, timeframe, mercado):
         self.timeframe = timeframe
-        self.clave = (_extraer_moneda(coin), timeframe)
-        self.ruta = _ruta_lock(coin, timeframe)
+        self.mercado = _validar_mercado(mercado)
+        self.clave = (_extraer_moneda(coin), timeframe, mercado)
+        self.ruta = _ruta_lock(coin, timeframe, mercado)
         self.propio = False
 
     def __enter__(self):
@@ -259,7 +410,7 @@ class Lock:
         if pid_previo is not None and _pid_vivo(pid_previo):
             raise RuntimeError(
                 f"[LOCK] Ya hay un proceso con {self.clave[0]} {self.timeframe} "
-                f"(PID {pid_previo}).\n"
+                f"{self.mercado} (PID {pid_previo}).\n"
                 f"       Lock: {self.ruta}"
             )
         try:
@@ -424,11 +575,16 @@ def _estado_vela(ruta):
 # Escritura del CSV
 # --------------------------------------------------------------------------
 
-def _crear_csv(ruta):
-    """Deja el CSV con solo la cabecera. Se usa al empezar de cero y al
-    descartar por hueco irrellenable (F3)."""
+def _crear_csv(ruta, coin, timeframe, mercado):
+    """Deja el CSV con solo la cabecera, y su .meta al lado. Se usa al empezar
+    de cero y al descartar por hueco irrellenable (F3).
+
+    El .meta se reescribe aqui a proposito: si el CSV se vacia, lo que hubiera
+    antes deja de contar y el fichero pasa a ser de este mercado sin discusion.
+    """
     with open(ruta, 'w', newline='', encoding='utf-8') as f:
         csv.writer(f, lineterminator='\n').writerow(CABECERA)
+    _escribir_meta(ruta, coin, timeframe, mercado)
 
 
 def _cerrar_ultima_linea(ruta):
@@ -591,7 +747,7 @@ def _pedir_rango(simbolo, timeframe, desde_ts, hasta_ts):
 # F2 + F3: lotes, verificacion y huecos
 # --------------------------------------------------------------------------
 
-def _validar_lote(coin, simbolo, timeframe, velas, ts_esperado):
+def _validar_lote(coin, simbolo, timeframe, mercado, velas, ts_esperado):
     """Verifica EN MEMORIA que el lote es consecutivo y empalma con lo ya
     guardado. Devuelve (velas_continuas, reinicio, descartadas_del_lote).
 
@@ -617,11 +773,11 @@ def _validar_lote(coin, simbolo, timeframe, velas, ts_esperado):
                         and all(relleno[i][0] - relleno[i - 1][0] == tf_ms
                                 for i in range(1, len(relleno))))
             if continuo:
-                _log(coin, timeframe,
+                _log(coin, timeframe, mercado,
                      f"[HUECO] {faltan} vela(s) rellenada(s) en {_fecha(esperado)}")
                 salida.extend(relleno)
             else:
-                _log(coin, timeframe,
+                _log(coin, timeframe, mercado,
                      f"[HUECO IRRELLENABLE] {faltan} vela(s) que Bitget no tiene "
                      f"desde {_fecha(esperado)}. Sin continuidad los datos no "
                      f"valen: se descarta el historial anterior y se reinicia "
@@ -635,7 +791,7 @@ def _validar_lote(coin, simbolo, timeframe, velas, ts_esperado):
     return salida, reinicio, descartadas
 
 
-def bajar_por_lotes(coin, timeframe, destino_ts, origen_ts=None):
+def bajar_por_lotes(coin, timeframe, mercado, destino_ts, origen_ts=None):
     """F2: pide lotes hasta destino_ts (inclusive), verificando cada lote
     antes de escribirlo. Devuelve el numero de velas añadidas.
 
@@ -646,21 +802,33 @@ def bajar_por_lotes(coin, timeframe, destino_ts, origen_ts=None):
     Se escribe en append por lotes ya verificados: si el proceso muere, el
     CSV queda mas corto pero SIEMPRE continuo, y reanudable (F5).
     """
-    simbolo = _simbolo(coin)
+    simbolo = _simbolo(coin, mercado)
     tf_ms = _tf_ms(timeframe)
-    ruta = _archivo(coin, timeframe)
+    ruta = _archivo(coin, timeframe, mercado)
+    _comprobar_meta(ruta, coin, timeframe, mercado)
+
+    # F4 tambien aqui: el lote no confirma vela por vela, asi que se corta
+    # antes de llegar a ninguna que pueda seguir consolidandose. La ultima
+    # cerrada se la deja a poner_al_dia, que si la confirma. Sin esto, un
+    # equipo que arranca justo al cerrar una vela la escribiria sin sellar y
+    # ese valor se quedaria en el CSV para siempre.
+    margen_ms = (MARGEN_CIERRE + CONFIRMA_SEG) * 1000
+    tope = _cliente().milliseconds() - margen_ms - tf_ms
+    tope -= tope % tf_ms
+    if destino_ts > tope:
+        destino_ts = tope
 
     ts_ultimo = _sanear_cola(ruta, timeframe)
     if ts_ultimo is None:
         if origen_ts is None:
             origen_ts = origen_exchange(simbolo, timeframe)
             if origen_ts is None:
-                _log(coin, timeframe,
+                _log(coin, timeframe, mercado,
                      f"[AVISO] Bitget no devuelve datos para {simbolo} {timeframe}")
                 return 0
-            _log(coin, timeframe,
+            _log(coin, timeframe, mercado,
                  f"[ORIGEN] primer registro del exchange: {_fecha(origen_ts)}")
-        _crear_csv(ruta)
+        _crear_csv(ruta, coin, timeframe, mercado)
         since = origen_ts - (origen_ts % tf_ms)
         esperado = None
     else:
@@ -677,19 +845,19 @@ def bajar_por_lotes(coin, timeframe, destino_ts, origen_ts=None):
             return
         buffer.sort(key=lambda v: v[0])
         velas_ok, reinicio, descartadas = _validar_lote(
-            coin, simbolo, timeframe, buffer, esperado)
+            coin, simbolo, timeframe, mercado, buffer, esperado)
         if reinicio:
             previas = _contar_velas(ruta)
             if previas or descartadas:
-                _log(coin, timeframe,
+                _log(coin, timeframe, mercado,
                      f"[DESCARTE] {previas + descartadas:,} vela(s) descartada(s) "
                      f"por falta de continuidad")
-            _crear_csv(ruta)
+            _crear_csv(ruta, coin, timeframe, mercado)
             total = 0
         if velas_ok:
             total += _anexar(ruta, velas_ok)
             esperado = velas_ok[-1][0] + tf_ms
-            _log(coin, timeframe,
+            _log(coin, timeframe, mercado,
                  f"[LOTE] {total:,} vela(s) -> {_fecha(velas_ok[-1][0])}")
         buffer = []
 
@@ -719,52 +887,79 @@ def bajar_por_lotes(coin, timeframe, destino_ts, origen_ts=None):
     return total
 
 
-def poner_al_dia(coin, timeframe, origen_ts=None):
+def _pedir_sellada(simbolo, timeframe, ts):
+    """F4: la vela 'ts' solo si ya esta sellada. None si aun se mueve.
+
+    Se pide dos veces separadas CONFIRMA_SEG y se comparan los cinco campos.
+    Una vela recien cerrada sigue consolidandose en Bitget unos segundos: si
+    las dos lecturas coinciden esta quieta, y si no, no se guarda nada.
+
+    No hay reintento en bucle a proposito. Devolver None deja el CSV como
+    estaba, y la pasada siguiente vera 'falta 1 vela' y la pedira otra vez,
+    ya con un ciclo entero de antiguedad. Insistir aqui solo serviria para
+    bloquear el resto de TF que esperan turno.
+    """
+    tf_ms = _tf_ms(timeframe)
+    primera = _pedir_rango(simbolo, timeframe, ts, ts + tf_ms)
+    if not primera or primera[0][0] != ts:
+        return None
+    time.sleep(CONFIRMA_SEG)
+    segunda = _pedir_rango(simbolo, timeframe, ts, ts + tf_ms)
+    if not segunda or segunda[0][0] != ts:
+        return None
+    return primera[0] if primera[0] == segunda[0] else None
+
+
+def poner_al_dia(coin, timeframe, mercado, origen_ts=None):
     """F1: compara la ultima guardada con actual-1 y decide el camino.
 
       falta 0 velas -> al dia, no hace nada
-      falta 1 vela  -> se pide, se valida con F3 (huecos) y se añade.
+      falta 1 vela  -> se pide CONFIRMADA (F4), se valida con F3 y se añade.
       faltan mas    -> LOTES (F2), que si aplica F3.
 
     Devuelve el numero de velas añadidas.
     """
-    ruta = _archivo(coin, timeframe)
+    ruta = _archivo(coin, timeframe, mercado)
+    simbolo = _simbolo(coin, mercado)
     tf_ms = _tf_ms(timeframe)
     destino = _ts_ultima_cerrada(timeframe)
+    _comprobar_meta(ruta, coin, timeframe, mercado)
     ts_ultimo = _sanear_cola(ruta, timeframe)
 
     if ts_ultimo is not None and ts_ultimo >= destino:
         return 0                                     # al dia
 
     if ts_ultimo is not None and destino - ts_ultimo == tf_ms:
-        velas = _pedir_rango(_simbolo(coin), timeframe, destino, destino + tf_ms)
-        if not velas or velas[0][0] != destino:
-            _log(coin, timeframe,
-                 f"[PENDIENTE] la vela {_fecha(destino)} aun no esta disponible")
+        vela = _pedir_sellada(simbolo, timeframe, destino)
+        if vela is None:
+            _log(coin, timeframe, mercado,
+                 f"[PENDIENTE] la vela {_fecha(destino)} aun no esta sellada")
             return 0
         velas_ok, reinicio, descartadas = _validar_lote(
-            coin, _simbolo(coin), timeframe, velas[:1], destino)
+            coin, simbolo, timeframe, mercado, [vela], destino)
         if reinicio:
             previas = _contar_velas(ruta)
             if previas or descartadas:
-                _log(coin, timeframe,
+                _log(coin, timeframe, mercado,
                      f"[DESCARTE] {previas + descartadas:,} vela(s) descartada(s) "
                      f"por falta de continuidad")
-            _crear_csv(ruta)
+            _crear_csv(ruta, coin, timeframe, mercado)
         if velas_ok:
             _anexar(ruta, velas_ok)
-            _log(coin, timeframe, f"[VELA] {_fecha(velas_ok[0][0])} guardada")
+            _log(coin, timeframe, mercado,
+                 f"[VELA] {_fecha(velas_ok[0][0])} guardada")
             return len(velas_ok)
         return 0
 
-    return bajar_por_lotes(coin, timeframe, destino, origen_ts=origen_ts)
+    return bajar_por_lotes(coin, timeframe, mercado, destino,
+                           origen_ts=origen_ts)
 
 
 # --------------------------------------------------------------------------
 # F6: uso como libreria (no toca disco)
 # --------------------------------------------------------------------------
 
-def vela_actual(coin, timeframe):
+def vela_actual(coin, timeframe, mercado):
     """Vela EN CURSO tal como esta ahora mismo: no la anterior, y no espera
     a que cierre. Una peticion a la API, sin tocar disco.
 
@@ -774,21 +969,21 @@ def vela_actual(coin, timeframe):
     _validar_tf(timeframe)
     tf_ms = _tf_ms(timeframe)
     ts = _ts_actual(timeframe)
-    for v in _fetch(_simbolo(coin), timeframe, ts - tf_ms, limite=3):
+    for v in _fetch(_simbolo(coin, mercado), timeframe, ts - tf_ms, limite=3):
         if v[0] == ts:
             return {'ts': v[0], 'fecha': _fecha(v[0]), 'open': v[1], 'high': v[2],
                     'low': v[3], 'close': v[4], 'vol': v[5], 'cerrada': False}
     return None
 
 
-def ultimas_velas(coin, timeframe, n):
+def ultimas_velas(coin, timeframe, mercado, n):
     """Ultimas n velas CERRADAS, de la mas antigua a la mas reciente, leidas
     de la cola del CSV. Es la via rapida para indicadores: el CSV ya esta
     validado sin huecos. Devuelve [] si no hay CSV, y menos de n si el CSV
     tiene menos.
     """
     _validar_tf(timeframe)
-    ruta = _archivo(coin, timeframe)
+    ruta = _archivo(coin, timeframe, mercado)
     if not ruta.exists():
         return []
     n_bytes = max(COLA_BYTES, n * 128)
@@ -822,16 +1017,26 @@ def _validar_tf(timeframe):
 
 
 def resolver_tfs(timeframes_str):
-    """'5m,15m,1h' -> ['5m','15m','1h']. None/vacio -> todos."""
+    """'5m,15m,1h' -> ['5m','15m','1h']. None/vacio -> todos.
+
+    Un TF que no existe es un error, no algo que se descarte por lo bajo:
+    antes '5m,15min,1h' devolvia ['5m','1h'] y te ibas convencido de estar
+    bajando tres TF cuando eran dos.
+    """
     if not timeframes_str:
         return list(TIMEFRAMES)
-    return [tf.strip() for tf in timeframes_str.split(',') if tf.strip() in TIMEFRAMES]
+    pedidos = [tf.strip() for tf in timeframes_str.split(',') if tf.strip()]
+    malos = [tf for tf in pedidos if tf not in TIMEFRAMES]
+    if malos:
+        raise ValueError(
+            f"TF no reconocidos: {', '.join(malos)}. Usa: {','.join(TIMEFRAMES)}")
+    return pedidos
 
 
-def resumen(coin, tfs):
-    print(f"\n[RESUMEN] {_extraer_moneda(coin)}:")
+def resumen(coin, tfs, mercado):
+    print(f"\n[RESUMEN] {_extraer_moneda(coin)} {mercado}:")
     for tf in tfs:
-        estado = _estado_vela(_archivo(coin, tf))
+        estado = _estado_vela(_archivo(coin, tf, mercado))
         if estado:
             print(f"  {tf:4} | {estado['fecha']} | close={estado['close']:12.4f} "
                   f"| vol={estado['vol']:14.0f}")
@@ -841,17 +1046,39 @@ def resumen(coin, tfs):
 
 def parsear_args(argv, banderas=()):
     """(coin, tfs_str, opciones) de la linea de comandos. Las 'banderas'
-    son los --flag booleanos que acepta el frontal."""
+    son los --flag booleanos que acepta el frontal.
+
+    Lo que no se reconoce ES UN ERROR. Antes se descartaba en silencio, y eso
+    convertia una errata en un comando distinto del que pediste sin avisar:
+    '--rehacerr' dejaba rehacer=False y en vez de reconstruir el CSV desde el
+    origen seguia hacia adelante; '--lop' hacia una pasada y salia en vez de
+    quedarse de daemon, y no te enterabas hasta que faltaban velas horas
+    despues. Un 'eth 5m 15m' con espacio en vez de coma perdia el 15m.
+
+    Se filtra por '-' y no por '--' porque con un solo guion era peor todavia:
+    '-rehacer' no entraba por la rama de banderas y se tomaba como el nombre
+    de la moneda.
+    """
     coin = None
     tfs = None
     opciones = {b: False for b in banderas}
+    sobrantes = []
     for arg in argv:
-        if arg.startswith('--'):
+        if arg.startswith('-'):
             if arg in opciones:
                 opciones[arg] = True
+            else:
+                sobrantes.append(arg)
             continue
         if coin is None:
             coin = arg
         elif tfs is None:
             tfs = arg
+        else:
+            sobrantes.append(arg)
+    if sobrantes:
+        raise ValueError(
+            f"argumentos no reconocidos: {' '.join(sobrantes)}\n"
+            f"       banderas validas: {', '.join(banderas) if banderas else 'ninguna'}\n"
+            f"       los TF van juntos y con comas: 5m,15m,1h")
     return coin, tfs, opciones
