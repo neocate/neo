@@ -23,5 +23,4 @@ nohup venv/bin/python -u velas/descargar_bit_futuros.py eth --loop >/dev/null 2>
 nohup venv/bin/python -u velas/descargar_bit_spot.py eth --loop >/dev/null 2>&1 &
 nohup venv/bin/python -u niveles/niveles.py eth --mercado futuros --loop 60 >/dev/null 2>&1 &
 
-tail -f velas/log/ETH_*.log
-
+agente de planificación
