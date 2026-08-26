@@ -39,7 +39,8 @@ sys.path.insert(0, str(BASE_DIR / "velas"))
 sys.path.insert(0, str(BASE_DIR / "niveles"))
 sys.path.insert(0, str(BASE_DIR))
 import velas_bit
-import niveles
+from persistencia import leer_ultimo
+from io_velas import TIMEFRAMES
 import sincronia
 from indicadores import indicadores
 
@@ -254,7 +255,7 @@ def cargar_orderbook(coin: str, mercado: str) -> Optional[Dict]:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def cargar_niveles(coin: str, niveles_tf: str, mercado: str) -> Optional[Dict]:
-    datos = niveles.leer_ultimo(coin, niveles_tf, mercado)
+    datos = leer_ultimo(coin, niveles_tf, mercado)
     if datos is None:
         logger.warning(f"Sin JSON de niveles para {coin} {niveles_tf} {mercado}")
         return None
@@ -462,7 +463,7 @@ Examples:
 
     parser.add_argument('--tf', type=str, default='5m', choices=TF_ORDER,
                        help='Timeframe to analyze (default: 5m)')
-    parser.add_argument('--niveles-tf', type=str, default=None, choices=niveles.TIMEFRAMES,
+    parser.add_argument('--niveles-tf', type=str, default=None, choices=TIMEFRAMES,
                        help='TF de niveles a usar (default: igual que --tf)')
     parser.add_argument('--coin', type=str, default='ETH', help='Coin to analyze (default: ETH)')
     parser.add_argument('--mercado', type=str, default='futuros', help='Market type (default: futuros)')

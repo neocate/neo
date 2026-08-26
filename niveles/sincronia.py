@@ -35,7 +35,7 @@ DIR_NEO = DIR_NIVELES.parent
 sys.path.insert(0, str(DIR_NIVELES))
 sys.path.insert(0, str(DIR_NEO / "velas"))
 from velas_bit import MERCADOS, TF_SEGUNDOS, resolver_tfs
-import niveles as _niveles
+from persistencia import leer_ultimo
 
 MERCADO_POR_DEFECTO = "futuros"
 
@@ -75,7 +75,7 @@ def _duracion(ms):
 def leer_snapshot(coin, tf, mercado):
     """Datos minimos de un JSON de niveles para juzgar si esta al dia.
     None si no hay fichero (o esta roto) para ese TF."""
-    datos = _niveles.leer_ultimo(coin, tf, mercado)
+    datos = leer_ultimo(coin, tf, mercado)
     if datos is None:
         return None
 
