@@ -40,9 +40,22 @@ CONFIG_DIR = SCRIPT_DIR / "config"
 for dir_path in [LOG_DIR, DATA_DIR, CONFIG_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
 
-# Archivos
-ANALYSIS_CSV = DATA_DIR / "eth_setup_log.csv"
-LOG_FILE = LOG_DIR / "analyzer.log"
+# TF dinámico (será actualizado por CLI args)
+CURRENT_TF = "5m"
+
+# Archivos (se actualizan según TF)
+def get_analysis_csv(tf=None):
+    """Obtener path del CSV según TF"""
+    tf = tf or CURRENT_TF
+    return DATA_DIR / f"eth_setup_log_{tf}.csv"
+
+def get_log_file(tf=None):
+    """Obtener path del log según TF"""
+    tf = tf or CURRENT_TF
+    return LOG_DIR / f"analyzer_{tf}.log"
+
+ANALYSIS_CSV = get_analysis_csv()
+LOG_FILE = get_log_file()
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -280,22 +293,35 @@ def evaluate_setup(m1: Dict, m5: Dict, m15: Dict, m1h: Dict, ob: Dict, config: D
 # MAIN
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def run_analysis() -> bool:
+def run_analysis(tf=None) -> bool:
     """Ejecutar análisis y registrar en CSV"""
+    
+    if tf is None:
+        tf = CURRENT_TF
 
     logger.info("=" * 60)
-    logger.info("Starting analysis...")
+    logger.info(f"Starting analysis for TF: {tf}")
 
-    # Cargar datos
-    m1 = calculate_indicators(load_candles('1m', CONFIG['candles']['1m']))
-    m5 = calculate_indicators(load_candles('5m', CONFIG['candles']['5m']))
-    m15 = calculate_indicators(load_candles('15m', CONFIG['candles']['15m']))
-    m1h = calculate_indicators(load_candles('1h', CONFIG['candles']['1h']))
+    # Cargar datos - usar TF principal + mayores para confirmación
+    tf_order = ['1m', '5m', '15m', '1h', '4h']
+    tf_index = tf_order.index(tf)
+    
+    # TF principal
+    principal = calculate_indicators(load_candles(tf, CONFIG['candles'].get(tf, 30)))
+    
+    # TF mayores (para confirmación)
+    tf_mayor1 = tf_order[min(tf_index + 1, len(tf_order) - 1)]
+    tf_mayor2 = tf_order[min(tf_index + 2, len(tf_order) - 1)]
+    
+    tf_mayor1_data = calculate_indicators(load_candles(tf_mayor1, CONFIG['candles'].get(tf_mayor1, 20)))
+    tf_mayor2_data = calculate_indicators(load_candles(tf_mayor2, CONFIG['candles'].get(tf_mayor2, 10)))
+    
+    # Orderbook siempre es igual
     ob = get_orderbook()
     niveles = get_niveles()
 
-    # Evaluar
-    setup = evaluate_setup(m1, m5, m15, m1h, ob, CONFIG)
+    # Evaluar setup - usar TF principal + mayores para confirmación
+    setup = evaluate_setup(principal, tf_mayor1_data, tf_mayor2_data, principal, ob, CONFIG)
 
     if not setup:
         logger.error("Could not evaluate setup")
@@ -304,22 +330,23 @@ def run_analysis() -> bool:
     # Preparar registro
     record = {
         'timestamp': datetime.now().isoformat(),
+        'tf': tf,
         'signal': setup['signal'],
         'confidence': round(setup['confidence'], 2),
         'strength': setup['strength'],
-        'price': round(m5['close'], 2),
-        'sma_5m': round(m5['sma'], 2),
-        'high_5m': round(m5['high'], 2),
-        'low_5m': round(m5['low'], 2),
-        'trend_5m': m5['trend'],
-        'trend_15m': m15['trend'],
-        'vol_ratio': round(m5['vol_ratio'], 2),
+        'price': round(principal['close'], 2),
+        'sma': round(principal['sma'], 2),
+        'high': round(principal['high'], 2),
+        'low': round(principal['low'], 2),
+        'trend': principal['trend'],
+        'trend_mayor': tf_mayor1_data['trend'] if tf_mayor1_data else 'N/A',
+        'vol_ratio': round(principal['vol_ratio'], 2),
         'imbalance': round(ob['imbalance'], 3),
         'delta': round(ob['delta'], 1),
         'funding_rate': round(ob['funding_rate'], 4),
         'long_conds': setup['long_conds'],
         'short_conds': setup['short_conds'],
-        'rsi_5m': round(m5['rsi'], 1)
+        'rsi': round(principal['rsi'], 1)
     }
 
     # Guardar en CSV
@@ -341,16 +368,23 @@ def run_analysis() -> bool:
 def main():
     """CLI entry point"""
     parser = argparse.ArgumentParser(
-        description='ETH Setup Analyzer',
+        description='ETH Setup Analyzer - Multi-TF support',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  python3 analyzer.py                              # Single run
-  python3 analyzer.py --loop 60                    # Loop every 60 seconds
-  nohup python3 -u analyzer.py --loop 60 >/dev/null 2>&1 &
+  python3 analyzer.py                                    # Single run, default TF (5m)
+  python3 analyzer.py --tf 15m --loop 60                # Loop 15m every 60 seconds
+  python3 analyzer.py --tf 1h --loop 120 --verbose      # 1h with verbose output
+  
+  # Run multiple TF in parallel:
+  nohup python3 -u analyzer.py --tf 5m --loop 60 >/dev/null 2>&1 &
+  nohup python3 -u analyzer.py --tf 15m --loop 60 >/dev/null 2>&1 &
+  nohup python3 -u analyzer.py --tf 1h --loop 120 >/dev/null 2>&1 &
         '''
     )
 
+    parser.add_argument('--tf', type=str, default='5m', choices=['1m', '5m', '15m', '1h', '4h'], 
+                       help='Timeframe to analyze (default: 5m)')
     parser.add_argument('--coin', type=str, default='ETH', help='Coin to analyze (default: ETH)')
     parser.add_argument('--mercado', type=str, default='futuros', help='Market type (default: futuros)')
     parser.add_argument('--loop', type=int, default=None, help='Loop interval in seconds (default: single run)')
@@ -358,10 +392,29 @@ Examples:
 
     args = parser.parse_args()
 
+    # Actualizar TF global
+    global CURRENT_TF, ANALYSIS_CSV, LOG_FILE
+    CURRENT_TF = args.tf
+    ANALYSIS_CSV = get_analysis_csv(args.tf)
+    LOG_FILE = get_log_file(args.tf)
+
+    # Reconfigar logging con nuevo archivo
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(LOG_FILE),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+
     if args.verbose:
         logger.setLevel(logging.DEBUG)
 
-    logger.info(f"Starting analyzer: {args.coin} {args.mercado}")
+    logger.info(f"Starting analyzer: {args.coin} {args.mercado} | TF: {args.tf}")
 
     if args.loop:
         logger.info(f"Loop mode: {args.loop} seconds interval")

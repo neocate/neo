@@ -55,6 +55,9 @@ Nadie escribe donde escribe otro.
 | `indicadores/indicadores.py` | Indicadores técnicos (SMA, EMA, ATR…). Librería pura, sin E/S. | No se ejecuta |
 | `mercado/contrato.py` | Lee del exchange las specs del par: comisiones, márgenes, precisiones, apalancamiento. | Bajo demanda |
 | `consumidor.py` | Cruza niveles + velas + libro y emite señales de confluencia. | Puntual o `--loop` |
+| `analizador/src/analyzer.py` | Evaluador multi-TF: predice setup en base a indicadores, libro y niveles. Logging independiente por TF. | Daemon multi-instancia (`--tf 5m --loop 60`) |
+| `analizador/src/backtest.py` | Valida predicciones vs precios futuros. P&L realista (comisiones reales de `contrato.py`). Compara TF. | Puntual (`--tf 15m` o `--compare`) |
+| `analizador/src/tf_efficiency.py` | Diagnóstico: mide eficiencia de cada TF (flip rate, ruido/señal, calidad de niveles). | Puntual |
 
 ---
 
@@ -107,6 +110,40 @@ python consumidor.py eth 1h --loop 60
 
 En `arranques.txt` están los arranques de todos los TF y los `ps`/`kill` de rigor.
 
+**6. Analyzer** (multi-TF, independiente; requiere velas + libro + niveles)
+
+```bash
+# Lanzar dos instancias en paralelo (5m y 15m)
+nohup venv/bin/python -u analizador/src/analyzer.py --tf 5m --loop 60 >/dev/null 2>&1 &
+nohup venv/bin/python -u analizador/src/analyzer.py --tf 15m --loop 60 >/dev/null 2>&1 &
+
+# O un solo TF
+nohup venv/bin/python -u analizador/src/analyzer.py --tf 1h --loop 120 >/dev/null 2>&1 &
+```
+
+Genera CSVs independientes por TF: `analizador/datos/eth_setup_log_{tf}.csv`
+Logs en: `analizador/log/analyzer_{tf}.log`
+
+**7. Backtest** (valida predicciones del analyzer contra precios reales, con P&L realista)
+
+```bash
+# Backtest de un TF
+venv/bin/python -u analizador/src/backtest.py --tf 5m
+
+# Comparar todos los TF lado a lado
+venv/bin/python -u analizador/src/backtest.py --compare
+
+# Con horizonte diferente (2 horas en lugar de 1)
+venv/bin/python -u analizador/src/backtest.py --tf 15m --hours 2
+```
+
+**8. Eficiencia de TF** (diagnóstico: cuál TF es más efectivo)
+
+```bash
+# Analizar estructura de niveles en todos los TF
+venv/bin/python -u analizador/src/tf_efficiency.py
+```
+
 ---
 
 ## Datos en disco
@@ -123,9 +160,15 @@ libro/logs/libro_COIN.log
 niveles/params_COIN_TF.json       parámetros de entrada (se releen en caliente)
 niveles/json/nivel_COIN_TF_kN_toquesM.json    salida
 niveles/logs/niveles_COIN_TF.log
+
+analizador/datos/eth_setup_log_{tf}.csv      predicciones por TF
+analizador/datos/eth_backtest_results_{tf}.csv   validación vs precios reales
+analizador/log/analyzer_{tf}.log             logs del analyzer por TF
+analizador/log/backtest.log                  logs del backtest
+analizador/config/config.json                parámetros del analyzer (se relectura en caliente)
 ```
 
-Nada de esto se versiona salvo los `params_*.json`.
+Nada de esto se versiona salvo los `params_*.json` y `analizador/config/config.json`.
 
 ### Formatos
 
