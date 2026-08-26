@@ -476,9 +476,13 @@ def backtest_tf_dynamic(tf, hours_ahead=1, initial_capital=250):
         # Ejecutar trade con capital dinámico
         entry_price = result['entry_price']
         pnl_neto = result['pnl_neto']
-        
-        # Escalar P&L según capital real usado vs 1 lote (2500 USDT)
-        capital_pct = capital / 2500.0
+
+        # pnl_neto viene calculado para size=1.0 ETH (ver calculate_pnl). El
+        # capital disponible compra capital/entry_price ETH a ese precio, asi
+        # que el P&L real escala por eso, no por una notional fija: 2500 USDT
+        # solo equivalia a 1 ETH cuando ETH cotizaba ahi, y deja de ser cierto
+        # en cuanto el precio se mueve.
+        capital_pct = capital / entry_price
         pnl_escalado = pnl_neto * capital_pct
         
         # Actualizar capital
