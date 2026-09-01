@@ -155,7 +155,7 @@ def detectar_niveles(velas, k, tolerancia_atr, toques_min, periodo_atr=14, verbo
             if toques >= toques_min:
                 candidatos.append(dict(
                     tipo=tipo, precio=nivel, toques=toques,
-                    primero=primero, ultimo=ultimo,
+                    primero=primero, ts_ultimo_toque=ultimo,
                     velas_dentro=dentro, fuerza=_fuerza(toques, dentro)))
     if verbose:
         print(f"  [4/5] Toques: {len(candidatos)} candidatos ({time.time()-ts:.1f}s)", flush=True)
@@ -185,7 +185,7 @@ def _evaluar_niveles(velas, niveles, confirmacion_velas, tol_serie):
         niv["fecha_rotura"] = _fmt_fecha(ts_rotura) if ts_rotura else None
         niv["dias_desde_rotura"] = (ts_final - ts_rotura) / 86400000 if ts_rotura and ts_final else None
         niv["dist_pct"] = (niv["precio"] - precio_actual) / precio_actual * 100 if precio_actual and precio_actual > 0 else 0
-        niv["antig_dias"] = (ts_final - niv["ultimo"]) / 86400000 if ts_final and ts_final > niv["ultimo"] else 0
+        niv["antig_dias"] = (ts_final - niv["ts_ultimo_toque"]) / 86400000 if ts_final and ts_final > niv["ts_ultimo_toque"] else 0
         if precio_actual is None:
             niv["vigente"] = False
         elif niv["tipo"] == "techo":

@@ -14,13 +14,36 @@ pkill -f "niveles.py" <- por ficheros
 
 
 
-nohup venv/bin/python -u analizador/src/analyzer.py --tf 15m --loop 60 >/dev/null 2>&1 &
-venv/bin/python -u analizador/src/backtest.py --tf 15m --dynamic
+nohup venv/bin/python -u analizador/analyzer.py --tf 15m --loop 60 >/dev/null 2>&1 &
+venv/bin/python -u analizador/backtest.py --tf 15m --dynamic
+venv/bin/python niveles/sincronia.py eth "1m","3m","5m","15m","30m","1h","4h","1d"
 
-
+# libro.py: SOLO lo irrecuperable (libro fino + amplio, OI, long/short).
+# Si esto se para, esas horas se pierden para siempre: no hay endpoint historico.
 nohup venv/bin/python -u libro/libro.py eth --cada 900 --mercado futuros >/dev/null 2>&1 &
+
+# flujo.py: el tape (delta, CVD) a 60s, reparandose solo dentro de la ventana
+# de 7 dias que sirve Bitget. Si se para, se repone al volver.
+# En arranque en frio conviene una pasada previa sin --loop (mas rapida, sin
+# tope por ciclo) antes de lanzar el bucle:
+#   venv/bin/python -u libro/flujo.py eth --cada 60
+nohup venv/bin/python -u libro/flujo.py eth --loop --cada 60 --mercado futuros >/dev/null 2>&1 &
 nohup venv/bin/python -u velas/descargar_bit_futuros.py eth --loop >/dev/null 2>&1 &
 nohup venv/bin/python -u velas/descargar_bit_spot.py eth --loop >/dev/null 2>&1 &
 nohup venv/bin/python -u niveles/niveles.py eth --mercado futuros --loop 60 >/dev/null 2>&1 &
 
 agente de planificación
+
+
+nohup venv/bin/python -u analizador/analyzer.py --tf 5m --dynamic
+nohup venv/bin/python -u analizador/analyzer.py --tf 15m --dynamic
+nohup venv/bin/python -u analizador/analyzer.py --tf 1h --dynamic
+
+
+https://inverlingold.com/neocat/router.php?modulo=lnas_comisiones&opcion=incluir&id_order=1299&token=mGTePivtW3T7bUKcISiYPDkPrbIecPOFEVr0iZ2rKMkq9XHiVLHDXWzeKkL5hM6q
+
+https://inverlingold.com/neocat/router.php?modulo=lnas_comisiones&opcion=cerrar&id_lnas_comision_cierre=1&token=mGTePivtW3T7bUKcISiYPDkPrbIecPOFEVr0iZ2rKMkq9XHiVLHDXWzeKkL5hM6q
+
+https://inverlingold.com/neocat/router.php?modulo=lnas_comisiones&opcion=actualizar&token=mGTePivtW3T7bUKcISiYPDkPrbIecPOFEVr0iZ2rKMkq9XHiVLHDXWzeKkL5hM6q
+
+https://inverlingold.com/neocat/router.php?modulo=lnas_comisiones&opcion=actualizar&enviar=si&token=mGTePivtW3T7bUKcISiYPDkPrbIecPOFEVr0iZ2rKMkq9XHiVLHDXWzeKkL5hM6q

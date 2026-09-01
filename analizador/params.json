@@ -10,6 +10,11 @@
     "ruptura_max_dias": 1.0,
     "proximidad_tolerancias": 2.0
   },
+  "libro_max_edad_seg": 1500,
+  "flujo_max_edad_seg": 150,
+
+  "//senales_validadas": "false = las senales se registran pero NO son operables. Sin validar: acierto bruto 47,3%, PF 0,962 (moneda al aire). Ponerlo a true solo si ic.py encuentra senal estable.",
+  "senales_validadas": false,
   "by_tf": {
     "1m": {
       "thresholds": {
@@ -22,7 +27,7 @@
       },
       "signals": {
         "min_conditions_long": 7,
-        "min_conditions_short": 6,
+        "min_conditions_short": 7,
         "strong_conditions": 7
       }
     },
@@ -44,24 +49,24 @@
     "15m": {
       "thresholds": {
         "imbalance_long": 0.35,
-        "imbalance_short": -0.2,
+        "imbalance_short": -0.35,
         "delta_long": 100,
-        "delta_short": -50,
+        "delta_short": -100,
         "vol_ratio_high": 0.8,
         "vol_ratio_low": 0.4
       },
       "signals": {
         "min_conditions_long": 6,
-        "min_conditions_short": 4,
+        "min_conditions_short": 6,
         "strong_conditions": 7
       }
     },
     "1h": {
       "thresholds": {
         "imbalance_long": 0.4,
-        "imbalance_short": -0.15,
+        "imbalance_short": -0.4,
         "delta_long": 50,
-        "delta_short": -30,
+        "delta_short": -50,
         "vol_ratio_high": 0.7,
         "vol_ratio_low": 0.45
       },

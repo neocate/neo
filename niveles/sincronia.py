@@ -179,6 +179,9 @@ def main():
     i = 0
     while i < len(resto):
         if resto[i] == "--mercado":
+            if i + 1 >= len(resto):
+                print("[ERROR] --mercado requiere un valor (spot|futuros)")
+                return 1
             i += 1
             mercado = resto[i]
         elif not resto[i].startswith("--"):

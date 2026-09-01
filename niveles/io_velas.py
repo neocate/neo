@@ -17,7 +17,12 @@ _RE_COIN = re.compile(r"^[A-Za-z0-9]{2,20}$")
 def validar_coin(valor):
     if not _RE_COIN.match(valor):
         raise ValueError(f"coin invalido: {valor!r} (solo letras/digitos, 2-20 caracteres)")
-    return valor
+    # Normalizado aqui, en el unico punto de entrada de la CLI: sin esto,
+    # 'eth' y 'ETH' generan lock, log y fichero de params distintos (este
+    # ultimo ni siquiera existe en mayusculas en disco) aunque _salida() los
+    # haga converger en el mismo JSON de salida, dejando el lock sin proteger
+    # nada entre las dos invocaciones.
+    return valor.lower()
 
 
 def _tf_a_ms(tf):
@@ -38,8 +43,10 @@ def _fila_vela(row):
     ts = int(row[0])
     apertura, alto, bajo, cierre = float(row[2]), float(row[3]), float(row[4]), float(row[5])
     volumen = float(row[6])
-    if not all(math.isfinite(x) for x in (apertura, alto, bajo, cierre)):
-        raise ValueError("OHLC no finito")
+    if not all(math.isfinite(x) for x in (apertura, alto, bajo, cierre, volumen)):
+        raise ValueError("OHLC/volumen no finito")
+    if volumen < 0:
+        raise ValueError("volumen negativo")
     if alto < max(apertura, cierre) or bajo > min(apertura, cierre) or alto < bajo:
         raise ValueError("OHLC inconsistente")
     return [ts, apertura, alto, bajo, cierre, volumen]
@@ -54,6 +61,14 @@ def _parsear(lineas):
             velas.append(_fila_vela(row))
         except (ValueError, IndexError):
             continue
+    # El resto del calculo (bisect_right en _evaluar_estado, series de ATR
+    # acumulativas) asume velas estrictamente ordenadas y sin duplicados sin
+    # comprobarlo: si algo corrompiera el CSV, esto fallaria en silencio con
+    # resultados incorrectos en vez de un error. Se corta aqui, alto y claro.
+    for i in range(1, len(velas)):
+        if velas[i][0] <= velas[i - 1][0]:
+            raise ValueError(
+                f"velas desordenadas o duplicadas: {velas[i - 1][0]} -> {velas[i][0]}")
     return velas
 
 
@@ -73,10 +88,21 @@ def _leer_cola(ruta, corte_ms, tf):
         # fuera en silencio.
         tam = os.path.getsize(ruta)
         leer = min(tam, leer)
+        desde_cero = leer == tam
         with open(ruta, 'rb') as f:
             f.seek(tam - leer)
             crudo = f.read(leer)
-        lineas = crudo.decode('utf-8', 'replace').splitlines()[1:]
+        lineas = crudo.decode('utf-8', 'replace').splitlines()
+        if not desde_cero:
+            # Lectura parcial: el seek cae a mitad de fichero, asi que la
+            # primera linea puede venir partida por la mitad - se descarta
+            # por seguridad (_parsear ya filtra la cabecera cuando SI se lee
+            # desde el principio, no hace falta cortarla aqui tambien). Caso
+            # raro: si el corte coincide justo con un salto de linea, se
+            # pierde una vela valida de ese borde; se autocorrige solo en la
+            # siguiente pasada, cuando el fichero haya crecido y el corte
+            # caiga en otro punto.
+            lineas = lineas[1:]
         velas = _parsear(lineas)
 
         if leer >= tam or (velas and velas[0][0] <= corte_ms):

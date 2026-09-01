@@ -127,7 +127,10 @@ def _num(params, clave):
     valor = params.get(clave, DEFAULTS.get(clave))
     if valor is None or valor == "":
         return None
-    return float(valor)
+    n = float(valor)
+    if not math.isfinite(n):
+        raise ValueError(f"{clave} no es un numero finito: {valor}")
+    return n
 
 
 def _leer_params(params_file, override_confirmacion=None, override_desde_dias=None):
@@ -146,19 +149,41 @@ def _leer_params(params_file, override_confirmacion=None, override_desde_dias=No
         raise ValueError(f"Parametros fuera de rango: k={k} (1-20), "
                          f"tolerancia_atr={tolerancia_atr} (0-5), toques_min={toques_min} (1-10)")
 
+    desde_dias = _num(params, "desde_dias")
+    max_dist_pct = _num(params, "max_dist_pct")
+    max_antig_dias = _num(params, "max_antig_dias")
+    periodo_atr = _num(params, "periodo_atr")
+    separacion_min_atr = _num(params, "separacion_min_atr")
+
+    # k/tolerancia_atr/toques_min ya se comprueban arriba porque son
+    # obligatorios; estos son opcionales (None = sin filtro/usa el default),
+    # pero si vienen puestos tienen que tener un valor que signifique algo:
+    # un max_dist_pct o max_antig_dias <= 0 filtraria todos los niveles en
+    # silencio, sin ningun aviso.
+    if desde_dias is not None and desde_dias <= 0:
+        raise ValueError(f"desde_dias fuera de rango: {desde_dias} (> 0, o null)")
+    if max_dist_pct is not None and max_dist_pct <= 0:
+        raise ValueError(f"max_dist_pct fuera de rango: {max_dist_pct} (> 0, o null)")
+    if max_antig_dias is not None and max_antig_dias <= 0:
+        raise ValueError(f"max_antig_dias fuera de rango: {max_antig_dias} (> 0, o null)")
+    if periodo_atr is not None and periodo_atr < 1:
+        raise ValueError(f"periodo_atr fuera de rango: {periodo_atr} (>= 1)")
+    if separacion_min_atr is not None and separacion_min_atr < 0:
+        raise ValueError(f"separacion_min_atr fuera de rango: {separacion_min_atr} (>= 0, o null)")
+
     cfg = {
         "k": int(k),
         "tolerancia_atr": float(tolerancia_atr),
         "toques_min": int(toques_min),
         "confirmacion_velas": int(_num(params, "confirmacion_velas")),
-        "desde_dias": _num(params, "desde_dias"),
-        "max_dist_pct": _num(params, "max_dist_pct"),
-        "max_antig_dias": _num(params, "max_antig_dias"),
-        "periodo_atr": int(_num(params, "periodo_atr")),
+        "desde_dias": desde_dias,
+        "max_dist_pct": max_dist_pct,
+        "max_antig_dias": max_antig_dias,
+        "periodo_atr": int(periodo_atr),
     }
 
-    sep = _num(params, "separacion_min_atr")
-    cfg["separacion_min_atr"] = sep if sep is not None else cfg["tolerancia_atr"] * 2
+    cfg["separacion_min_atr"] = (separacion_min_atr if separacion_min_atr is not None
+                                 else cfg["tolerancia_atr"] * 2)
 
     if override_confirmacion is not None:
         cfg["confirmacion_velas"] = override_confirmacion
@@ -258,8 +283,8 @@ def loop_principal(coin, mercado, intervalo_seg, desde_dias, confirmacion_velas,
         print(f"[{_fmt_fecha(int(datetime.now(timezone.utc).timestamp() * 1000))}] Iniciando LOOP")
         print(f"  Moneda: {coin.upper()} | Mercado: {mercado} | TF: {', '.join(tfs)}")
         print(f"  Intervalo: {intervalo_seg}s\n")
-        _log(coin, f"[ARRANQUE] PID {os.getpid()} | {mercado} | TF {','.join(tfs)} | "
-                   f"intervalo {intervalo_seg}s")
+        _log(coin, "all", f"[ARRANQUE] PID {os.getpid()} | {mercado} | TF {','.join(tfs)} | "
+                          f"intervalo {intervalo_seg}s")
 
         iteracion = 0
 
@@ -267,6 +292,10 @@ def loop_principal(coin, mercado, intervalo_seg, desde_dias, confirmacion_velas,
             iteracion += 1
             t0 = time.time()
             lock.latir()
+
+            if iteracion % 60 == 0:
+                _log(coin, "all", f"[HEARTBEAT] iteracion {iteracion}, sin cambios detectados",
+                     consola=True)
 
             for vig in vigilantes:
                 if _debe_terminar:
@@ -277,18 +306,18 @@ def loop_principal(coin, mercado, intervalo_seg, desde_dias, confirmacion_velas,
                     if res is None:
                         continue
                     marca, niveles, meta = res
-                    _log(coin, f"[{marca}] {vig.tf} | {len(niveles)} niveles | "
-                               f"precio {meta['precio_actual']:.4f} | "
-                               f"vela {_fmt_fecha(meta['ts_ultima_vela'])} | "
-                               f"{time.time()-t_tf:.1f}s", consola=True)
+                    _log(coin, vig.tf, f"[{marca}] {vig.tf} | {len(niveles)} niveles | "
+                                       f"precio {meta['precio_actual']:.4f} | "
+                                       f"vela {_fmt_fecha(meta['ts_ultima_vela'])} | "
+                                       f"{time.time()-t_tf:.1f}s", consola=True)
                 except Exception as e:
                     print(f"  [ERROR] {vig.tf}: {e}", flush=True)
-                    _log(coin, f"[ERROR] {vig.tf} iter {iteracion}: {type(e).__name__}: {e}", exc_info=True)
+                    _log(coin, vig.tf, f"[ERROR] {vig.tf} iter {iteracion}: {type(e).__name__}: {e}", exc_info=True)
 
             _dormir(max(0.0, intervalo_seg - (time.time() - t0)))
 
     finally:
-        _log(coin, f"[PARADA] PID {os.getpid()}")
+        _log(coin, "all", f"[PARADA] PID {os.getpid()}")
         lock.liberar()
         print(f"[{_fmt_fecha(int(datetime.now(timezone.utc).timestamp() * 1000))}] Finalizado")
 
@@ -315,7 +344,7 @@ def main(argv=None):
                 res = vig.procesar(args.confirmacion_velas, args.desde_dias)
             except Exception as e:
                 print(f"{tf}: ERROR {type(e).__name__}: {e}")
-                _log(coin, f"[ERROR] {tf} --una-vez: {type(e).__name__}: {e}", exc_info=True)
+                _log(coin, tf, f"[ERROR] {tf} --una-vez: {type(e).__name__}: {e}", exc_info=True)
                 continue
             _marca, niveles, meta = res
             print(f"{tf:>4}  {len(niveles):>3} niveles  precio {meta['precio_actual']:.4f}  "

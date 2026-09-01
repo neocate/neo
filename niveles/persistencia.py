@@ -42,10 +42,11 @@ class LockFile:
         if pid is not None and host == socket.gethostname():
             try:
                 os.kill(pid, 0)
+                return True           # certeza: el proceso existe de verdad
             except ProcessLookupError:
-                return False
+                return False          # certeza: ese proceso no existe
             except OSError:
-                pass
+                pass                  # indeterminado: decide el latido
         return not self._caducado()
 
     def _firma(self):
@@ -137,8 +138,8 @@ def leer_ultimo(coin, tf, mercado):
     return _cargar_json(candidatos[0])
 
 
-def _log(coin, mensaje, consola=False, exc_info=False):
-    ruta_log = DIR_LOGS / f"niveles_{coin}.log"
+def _log(coin, tf, mensaje, consola=False, exc_info=False):
+    ruta_log = DIR_LOGS / f"{coin}_{tf}.log"
     if consola:
         print(f"  {mensaje}", flush=True)
     texto = f"{mensaje}\n{traceback.format_exc()}" if exc_info else mensaje

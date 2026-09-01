@@ -1,135 +1,221 @@
 #!/usr/bin/env python3
 """
-TF Efficiency Analyzer
-Analiza cuál timeframe es más aprovechable midiendo:
-1. Win rate de niveles por TF
-2. Ratio ruido/señal (fake-outs vs confirmados)
+tf_efficiency.py - Ranking de timeframes basado en el backtest dinamico
+(expectancy neta, profit factor, drawdown, costes, LONG/SHORT por
+separado), no en flip_rate de niveles.
+
+El flip_rate y el "noise_ratio" de niveles se mantienen como seccion
+exploratoria al final, pero ya no deciden el TF recomendado: flip_rate no
+equivale a rentabilidad, y price_range/avg_volume mezcla unidades sin ser
+una medida de ruido solida.
+
+No hace walk-forward ni validacion fuera de muestra (queda pendiente, ver
+docstring de metricas_backtest): compara el historico completo de cada TF
+partido en dos mitades temporales como proxy simple de estabilidad. Tampoco
+imprime una recomendacion automatica de "usar este TF": el ranking es un
+insumo para decidir, no la decision.
+
+Uso:
+  python tf_efficiency.py
+  python tf_efficiency.py --tf 15m
+  python tf_efficiency.py --hours 2 --min-trades 30
 """
 
-import pandas as pd
+import argparse
 import json
+import sys
 from pathlib import Path
-from datetime import datetime
 
-BASE_DIR = Path(__file__).parent.parent  # neo/
-VELAS_DIR = BASE_DIR / "velas" / "ETH"
+import pandas as pd
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+BASE_DIR = SCRIPT_DIR.parent  # neo/
 NIVELES_DIR = BASE_DIR / "niveles" / "json"
-DATA_DIR = BASE_DIR / "analizador" / "datos"
+DATA_DIR = SCRIPT_DIR / "datos"
 
-def load_niveles_by_tf(tf):
-    """Cargar niveles de un timeframe específico"""
+sys.path.insert(0, str(SCRIPT_DIR))
+import backtest as bt
+
+TFS_DEFAULT = ['5m', '15m', '1h']
+
+
+def metricas_backtest(tf: str, hours_ahead: int, coin: str, mercado: str,
+                       exec_tf: str, sl_pct: float, tp_pct: float,
+                       capital: float, margin_pct: float):
+    """Regenera (via backtest_tf_dynamic) y lee el backtest dinamico de un
+    TF. Calcula expectancy neta, profit factor, drawdown maximo, costes
+    totales, desglose LONG/SHORT y una estabilidad simple (primera vs
+    segunda mitad del historico, no walk-forward real). Devuelve None si no
+    hay resultados."""
+    if not bt.backtest_tf_dynamic(tf, hours_ahead, capital, margin_pct,
+                                   coin, mercado, exec_tf, sl_pct, tp_pct):
+        return None
+
+    csv_file = DATA_DIR / f"eth_backtest_results_{tf}_dynamic.csv"
+    df = pd.read_csv(csv_file)
+    if df.empty:
+        return None
+    df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed', utc=True)
+    df = df.sort_values('timestamp').reset_index(drop=True)
+
+    n = len(df)
+    expectancy = df['pnl_escalado'].mean()
+
+    ganancias = df.loc[df['pnl_escalado'] > 0, 'pnl_escalado'].sum()
+    perdidas = -df.loc[df['pnl_escalado'] < 0, 'pnl_escalado'].sum()
+    profit_factor = (ganancias / perdidas) if perdidas > 0 else float('inf')
+
+    # Drawdown sobre la serie de capital que ya registra el backtest.
+    capital_serie = df['capital_despues']
+    maximo_acumulado = capital_serie.cummax()
+    drawdown = maximo_acumulado - capital_serie
+    max_dd_usdt = drawdown.max()
+    max_dd_pct = (drawdown / maximo_acumulado).max()
+
+    por_lado = {}
+    for signal in ('LONG', 'SHORT'):
+        sub = df[df['signal'] == signal]
+        por_lado[signal] = None if len(sub) == 0 else {
+            'n': len(sub),
+            'win_rate': sub['win'].sum() / len(sub),
+            'expectancy': sub['pnl_escalado'].mean(),
+            'total_pnl': sub['pnl_escalado'].sum(),
+        }
+
+    # Estabilidad temporal: primera vs segunda mitad del historico (proxy
+    # simple; falta walk-forward/out-of-sample real, ver docstring del
+    # modulo).
+    mitad = n // 2
+    exp_primera = df.iloc[:mitad]['pnl_escalado'].mean() if mitad > 0 else None
+    exp_segunda = df.iloc[mitad:]['pnl_escalado'].mean() if (n - mitad) > 0 else None
+    estable = (exp_primera is not None and exp_segunda is not None
+               and (exp_primera > 0) == (exp_segunda > 0))
+
+    return {
+        'n_trades': n,
+        'win_rate': df['win'].sum() / n if n else 0.0,
+        'expectancy': expectancy,
+        'profit_factor': profit_factor,
+        'total_pnl': df['pnl_escalado'].sum(),
+        'max_drawdown_usdt': max_dd_usdt,
+        'max_drawdown_pct': max_dd_pct,
+        'total_fees': df['comisiones'].sum(),
+        'por_lado': por_lado,
+        'exp_primera_mitad': exp_primera,
+        'exp_segunda_mitad': exp_segunda,
+        'estable': estable,
+    }
+
+
+def metricas_niveles(tf: str):
+    """Estadisticas exploratorias de niveles (flip_rate, toques, fuerza).
+    Informativas: ya no se usan para decidir el TF (ver docstring)."""
     file = NIVELES_DIR / f"nivel_ETH_{tf}_futuros_k5_toques3.json"
-
     if not file.exists():
         return None
 
     with open(file, 'r') as f:
-        data = json.load(f)
-
-    return data.get('niveles', [])
-
-def load_velas(tf):
-    """Cargar velas de un timeframe"""
-    file = VELAS_DIR / f"bitget_ETH_{tf}_futuros.csv"
-
-    if not file.exists():
+        niveles = json.load(f).get('niveles', [])
+    if not niveles:
         return None
 
-    df = pd.read_csv(file)
-    df['fecha_utc'] = pd.to_datetime(df['fecha_utc'])
-    return df.sort_values('fecha_utc')
+    total = len(niveles)
+    flipped = [n for n in niveles if n.get('estado') == 'flip']
+    return {
+        'total_niveles': total,
+        'flip_rate': len(flipped) / total,
+        'avg_toques': sum(n.get('toques', 0) for n in niveles) / total,
+        'avg_fuerza': sum(n.get('fuerza', 0) for n in niveles) / total,
+    }
 
-def analyze_tf_efficiency():
-    """Analizar eficiencia de cada TF"""
 
-    tfs = ['1m', '5m', '15m', '1h', '4h']
-    results = {}
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--tf', type=str, choices=TFS_DEFAULT, default=None,
+                       help='TF especifico (default: 5m, 15m y 1h)')
+    parser.add_argument('--hours', type=int, default=1, help='Horizonte del backtest en horas (default: 1)')
+    parser.add_argument('--coin', type=str, default='ETH', help='Moneda (default: ETH)')
+    parser.add_argument('--mercado', type=str, default='futuros', help='Mercado (default: futuros)')
+    parser.add_argument('--exec-tf', type=str, default='5m', help='Vela de ejecucion (default: 5m)')
+    parser.add_argument('--stop-pct', type=float, default=0.03, help='Stop-loss, fraccion (default: 0.03)')
+    parser.add_argument('--take-profit-pct', type=float, default=0.10, help='Take-profit, fraccion (default: 0.10)')
+    parser.add_argument('--capital', type=float, default=25, help='Margen inicial, USDT (default: 25)')
+    parser.add_argument('--margin-pct', type=float, default=0.10, help='Margen aislado, fraccion (default: 0.10)')
+    parser.add_argument('--min-trades', type=int, default=20,
+                       help='Minimo de operaciones para entrar en el ranking (default: 20)')
+    args = parser.parse_args()
 
-    print("\n" + "═" * 70)
-    print("TIMEFRAME EFFICIENCY ANALYSIS")
-    print(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("═" * 70 + "\n")
+    tfs = [args.tf] if args.tf else TFS_DEFAULT
 
-    for tf in tfs:
-        print(f"Analyzing {tf}...")
-
-        niveles = load_niveles_by_tf(tf)
-        velas = load_velas(tf)
-
-        if niveles is None or velas is None:
-            print(f"  ⚠ Missing data for {tf}\n")
-            continue
-
-        # Estadísticas de niveles
-        total_niveles = len(niveles)
-        activos = [n for n in niveles if n.get('estado') != 'flip']
-        flipped = [n for n in niveles if n.get('estado') == 'flip']
-
-        # Promedio de toques por nivel
-        avg_toques = sum(n.get('toques', 0) for n in niveles) / max(total_niveles, 1)
-        avg_fuerza = sum(n.get('fuerza', 0) for n in niveles) / max(total_niveles, 1)
-
-        # Volatilidad
-        velas['close_float'] = velas['close'].astype(float)
-        avg_vol = velas['volumen'].astype(float).mean()
-        price_range = velas['close_float'].max() - velas['close_float'].min()
-
-        results[tf] = {
-            'total_niveles': total_niveles,
-            'activos': len(activos),
-            'flipped': len(flipped),
-            'flip_rate': len(flipped) / max(total_niveles, 1),
-            'avg_toques': avg_toques,
-            'avg_fuerza': avg_fuerza,
-            'price_range': price_range,
-            'avg_volume': avg_vol,
-            'noise_ratio': price_range / avg_vol if avg_vol > 0 else 0
-        }
-
-        print(f"  ✓ {total_niveles} niveles")
-        print(f"    - Activos: {len(activos)} | Flipped: {len(flipped)} ({results[tf]['flip_rate']:.1%})")
-        print(f"    - Toques promedio: {avg_toques:.1f}")
-        print(f"    - Fuerza promedio: {avg_fuerza:.2f}")
-        print(f"    - Rango: {price_range:.2f} pts | Vol promedio: {avg_vol:.0f}\n")
-
-    # Resumen comparativo
-    print("=" * 70)
-    print("EFFICIENCY RANKING (mejor = menos ruido, más niveles confirmados)")
-    print("-" * 70)
-
-    # Ordenar por flip_rate (menos flipped = más niveles se mantienen)
-    ranking = sorted(results.items(), key=lambda x: x[1]['flip_rate'])
-
-    for i, (tf, data) in enumerate(ranking, 1):
-        efficiency = 1 - data['flip_rate']  # Inverso: mayor = mejor
-        print(f"\n{i}. {tf.upper()}")
-        print(f"   Efficiency Score:    {efficiency:.1%}")
-        print(f"   Flip Rate:           {data['flip_rate']:.1%} (niveles rotos)")
-        print(f"   Active Levels:       {data['activos']} de {data['total_niveles']}")
-        print(f"   Avg Touches:         {data['avg_toques']:.1f} por nivel")
-        print(f"   Avg Strength:        {data['avg_fuerza']:.2f}")
-        print(f"   Noise Ratio:         {data['noise_ratio']:.4f} (menor = mejor)")
-
-    # Recomendación
     print("\n" + "=" * 70)
-    print("RECOMMENDATION:")
+    print("TIMEFRAME EFFICIENCY (basado en backtest dinamico)")
+    print("=" * 70)
+
+    resultados = {}
+    for tf in tfs:
+        print(f"\nBacktest {tf}...")
+        m = metricas_backtest(tf, args.hours, args.coin, args.mercado, args.exec_tf,
+                               args.stop_pct, args.take_profit_pct, args.capital, args.margin_pct)
+        if m is None:
+            print(f"  [AVISO] Sin resultados de backtest para {tf}")
+            continue
+        resultados[tf] = m
+
+        print(f"  Trades: {m['n_trades']:4d}  Win Rate: {m['win_rate']:6.1%}  "
+              f"Expectancy: {m['expectancy']:+8.3f} USDT  Profit Factor: {m['profit_factor']:.2f}")
+        print(f"  Drawdown max: {m['max_drawdown_usdt']:8.2f} USDT ({m['max_drawdown_pct']:.1%})  "
+              f"Fees totales: {m['total_fees']:8.2f} USDT")
+        for signal in ('LONG', 'SHORT'):
+            lado = m['por_lado'][signal]
+            if lado is None:
+                print(f"    {signal}: sin trades")
+            else:
+                print(f"    {signal}: n={lado['n']:4d}  win_rate={lado['win_rate']:6.1%}  "
+                      f"expectancy={lado['expectancy']:+8.3f}  total_pnl={lado['total_pnl']:+9.2f}")
+        if m['exp_primera_mitad'] is not None and m['exp_segunda_mitad'] is not None:
+            print(f"  Estabilidad (1a vs 2a mitad): {m['exp_primera_mitad']:+.3f} vs "
+                  f"{m['exp_segunda_mitad']:+.3f} ({'estable' if m['estable'] else 'inestable'})")
+        else:
+            print("  Estabilidad: datos insuficientes")
+
+    if not resultados:
+        print("\nSin datos suficientes: ningun TF tuvo backtest con resultados.")
+        return
+
+    print("\n" + "=" * 70)
+    print(f"RANKING (por expectancy neta, minimo {args.min_trades} operaciones)")
     print("-" * 70)
 
-    best_tf = ranking[0][0]
-    best_efficiency = 1 - ranking[0][1]['flip_rate']
+    elegibles = {tf: m for tf, m in resultados.items() if m['n_trades'] >= args.min_trades}
+    excluidos = sorted(set(resultados) - set(elegibles))
+    if excluidos:
+        print(f"Excluidos por muestra insuficiente (<{args.min_trades} trades): {', '.join(excluidos)}")
 
-    print(f"\n✓ BEST TF: {best_tf.upper()} (Efficiency: {best_efficiency:.1%})")
-    print(f"\nRationale:")
-    print(f"  - Menos niveles rotos (flip_rate bajo)")
-    print(f"  - Mejor relación ruido/señal")
-    print(f"  - Niveles más duraderos y confiables")
-    print(f"\nUse {best_tf} como principal TF para analyzer.")
-    print(f"Usar {best_tf} + TF mayores como confirmación.\n")
+    ranking = sorted(elegibles.items(), key=lambda kv: kv[1]['expectancy'], reverse=True)
+    for i, (tf, m) in enumerate(ranking, 1):
+        print(f"{i}. {tf.upper():4s}  expectancy={m['expectancy']:+8.3f}  "
+              f"profit_factor={m['profit_factor']:.2f}  n={m['n_trades']:4d}  "
+              f"drawdown={m['max_drawdown_pct']:.1%}  {'estable' if m['estable'] else 'inestable'}")
+
+    if ranking:
+        print("\nEsto es un ranking sobre el historico disponible, no una validacion "
+              "fuera de muestra: falta walk-forward antes de fijar un TF definitivo.")
+    else:
+        print("Ningun TF alcanza el minimo de operaciones para figurar en el ranking.")
+
+    # Niveles: exploratorio, no entra en el ranking (ver docstring).
+    print("\n" + "=" * 70)
+    print("NIVELES (exploratorio, no decide el TF)")
+    print("-" * 70)
+    for tf in tfs:
+        nv = metricas_niveles(tf)
+        if nv is None:
+            print(f"  {tf}: sin datos de niveles")
+            continue
+        print(f"  {tf}: {nv['total_niveles']:3d} niveles | flip_rate={nv['flip_rate']:.1%} | "
+              f"toques_prom={nv['avg_toques']:.1f} | fuerza_prom={nv['avg_fuerza']:.2f}")
+
 
 if __name__ == "__main__":
-    try:
-        analyze_tf_efficiency()
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
+    main()

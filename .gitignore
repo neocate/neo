@@ -28,3 +28,6 @@ niveles/logs/*
 !niveles/json/.gitkeep
 !niveles/logs/.gitkeep
 
+
+# Locks de ejecucion
+*.lock
