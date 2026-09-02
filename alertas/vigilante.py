@@ -65,7 +65,22 @@ except ImportError:
 
 # Margen sobre la cadencia nominal antes de dar algo por caido. x3 deja pasar
 # un ciclo perdido por un reintento de red sin declarar una caida.
+#
+# Vale para libro y flujo, que graban con la HORA DE CAPTURA: su fila mas
+# reciente tiene 0 s de antiguedad recien escrita.
 FACTOR_MARGEN = 3.0
+
+# Las velas NO usan FACTOR_MARGEN: su timestamp es la APERTURA y solo se
+# guardan cerradas, con un margen de confirmacion encima. Medido en el log:
+# la vela que abre a las 19:26 se guarda a las 19:28:08 -- dos periodos y
+# pico de desfase estructural en 1m. Con el criterio de x3 saltaba una falsa
+# alarma en cuanto un poll se retrasaba unos segundos (2026-09-02: "hace 3m,
+# limite 3m").
+#
+# Se delega en sincronia.es_reciente, que ya resolvio esto para los niveles:
+# permite tf + max(2*tf, 300 s) desde la apertura. Para 15m y mas coincide
+# con lo que habia; para 1m da 6 min en vez de 3. Un solo criterio en el
+# proyecto en vez de dos que pueden separarse con el tiempo.
 
 CADENCIA_LIBRO_S = 900.0
 CADENCIA_FLUJO_S = 60.0
@@ -101,6 +116,23 @@ def _edad_ultima_fila(ruta, columna='fecha_utc'):
                 continue
             return _ahora() - t.replace(tzinfo=timezone.utc).timestamp()
     except (OSError, ValueError, StopIteration):
+        return None
+    return None
+
+
+def _ultimo_ts_ms(ruta):
+    """Timestamp (ms) de la ultima vela. Se lee la columna 0 y no fecha_utc:
+    es el mismo valor que consume sincronia.es_reciente, sin reparsear."""
+    try:
+        tam = os.path.getsize(ruta)
+        with open(ruta, 'rb') as f:
+            f.seek(max(0, tam - 8192))
+            cola = f.read().decode('utf-8', 'replace').splitlines()
+        for linea in reversed(cola):
+            campos = linea.split(',')
+            if campos and campos[0].strip().isdigit():
+                return int(campos[0])
+    except (OSError, ValueError):
         return None
     return None
 
@@ -145,11 +177,18 @@ def revisar(coin, mercado):
         seg = TF_SEGUNDOS.get(tf)
         if seg is None:
             continue
-        e = _edad_ultima_fila(p)
-        lim = seg * FACTOR_MARGEN
-        r.append(("velas %s" % tf, e is not None and e <= lim,
-                  "ultima vela hace %s (limite %s)" % (_dur(e), _dur(lim))
-                  if e is not None else "no se pudo leer la ultima vela"))
+        ts = _ultimo_ts_ms(p)
+        e = None if ts is None else _ahora() - ts / 1000.0
+        if ts is None:
+            ok, det = False, "no se pudo leer la ultima vela"
+        elif SINCRONIA:
+            ok = sincronia.es_reciente(ts, tf)
+            det = "ultima vela hace %s (criterio sincronia)" % _dur(e)
+        else:
+            lim = seg * FACTOR_MARGEN
+            ok = e <= lim
+            det = "ultima vela hace %s (limite %s)" % (_dur(e), _dur(lim))
+        r.append(("velas %s" % tf, ok, det))
 
     # --- niveles: criterio de sincronia, que ya es el bueno ---
     if SINCRONIA:
