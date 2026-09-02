@@ -287,18 +287,37 @@ def _archivo(coins, mercado):
 
 
 def _ruta_compatible(ruta, campos_esperados, logger):
+    """Ruta cuyo CSV tiene la cabecera esperada, sin mezclar esquemas.
+
+    Antes solo miraba el fichero base y, si no encajaba, cogia el primer _vN
+    LIBRE sin comprobar si alguno existente ya era compatible. Resultado: cada
+    reinicio abria un _vN nuevo y el dia quedaba partido en trozos (paso el
+    2026-09-01: _v2 y _v3 con cabecera identica y datos solapados en el tiempo).
+    Ahora se reutiliza el primer candidato compatible y solo se crea uno nuevo
+    si ninguno lo es."""
+
+    def _cabecera(r):
+        try:
+            with open(r, newline='', encoding='utf-8') as f:
+                return f.readline().strip()
+        except OSError:
+            return None
+
+    esperada = ','.join(campos_esperados)
     if not os.path.exists(ruta):
         return ruta
-    with open(ruta, newline="", encoding="utf-8") as f:
-        primera = f.readline().strip()
-    if primera == ",".join(campos_esperados):
+    if _cabecera(ruta) == esperada:
         return ruta
+
     base, ext = os.path.splitext(ruta)
     n = 2
-    while os.path.exists(f"{base}_v{n}{ext}"):
+    while os.path.exists(f'{base}_v{n}{ext}'):
+        if _cabecera(f'{base}_v{n}{ext}') == esperada:
+            logger.info(f'{ruta} tiene otra cabecera; continuo en {base}_v{n}{ext}')
+            return f'{base}_v{n}{ext}'
         n += 1
-    nueva = f"{base}_v{n}{ext}"
-    logger.warning(f"{ruta} cabecera distinta, usando {nueva}")
+    nueva = f'{base}_v{n}{ext}'
+    logger.warning(f'{ruta} cabecera distinta y ningun _vN compatible, creo {nueva}')
     return nueva
 
 

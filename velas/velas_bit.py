@@ -92,6 +92,7 @@
 import csv
 import json
 import os
+import platform
 import sys
 import time
 from datetime import datetime, timezone
@@ -406,11 +407,38 @@ class Lock:
             return
         except FileExistsError:
             pass
-        pid_previo = self._leer_pid()
+        host_previo, pid_previo = self._leer_marca()
+        aqui = platform.node()
+
+        # Un PID solo identifica un proceso DENTRO de su maquina. Estos CSV
+        # viven en un NAS que se toca desde varios equipos: sin el host,
+        # _pid_vivo() consultaba los procesos del equipo LOCAL, daba por muerto
+        # un daemon que seguia corriendo en el NAS, borraba su lock y arrancaba
+        # encima. Los dos procesos se destrozan el CSV: uno lo abre en 'w' y el
+        # otro en 'a'.
+        if host_previo is not None and host_previo != aqui:
+            raise RuntimeError(
+                f"[LOCK] {self.clave[0]} {self.timeframe} {self.mercado} esta tomado "
+                f"por OTRA MAQUINA ({host_previo}, PID {pid_previo}).\n"
+                f"       Desde aqui no se puede comprobar si sigue vivo.\n"
+                f"       Lock: {self.ruta}\n"
+                f"       Si es seguro que ya no corre, borra ese fichero a mano."
+            )
+        if host_previo is None and pid_previo is not None:
+            # Formato antiguo, sin host: no se sabe de que maquina salio, asi que
+            # no se puede decidir si esta huerfano. Se rechaza en vez de arriesgar
+            # el CSV. Desaparece solo al reiniciar los procesos.
+            raise RuntimeError(
+                f"[LOCK] {self.clave[0]} {self.timeframe} {self.mercado} tiene un "
+                f"lock en formato antiguo (PID {pid_previo}, sin maquina).\n"
+                f"       No se puede saber si su proceso vive; si no corre nada, "
+                f"borralo a mano.\n"
+                f"       Lock: {self.ruta}"
+            )
         if pid_previo is not None and _pid_vivo(pid_previo):
             raise RuntimeError(
                 f"[LOCK] Ya hay un proceso con {self.clave[0]} {self.timeframe} "
-                f"{self.mercado} (PID {pid_previo}).\n"
+                f"{self.mercado} (PID {pid_previo} en {host_previo}).\n"
                 f"       Lock: {self.ruta}"
             )
         try:
@@ -425,13 +453,25 @@ class Lock:
     def _crear(self):
         fd = os.open(str(self.ruta), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            f.write(f"{os.getpid()}\n")
+            f.write(f"{platform.node()}|{os.getpid()}\n")
 
-    def _leer_pid(self):
+    def _leer_marca(self):
+        """(host, pid) del lock. host es None si el fichero trae el formato
+        antiguo, que guardaba solo el PID."""
         try:
-            return int(self.ruta.read_text(encoding='utf-8').strip().split('\n')[0])
-        except (OSError, ValueError):
-            return None
+            crudo = self.ruta.read_text(encoding='utf-8').strip().splitlines()[0]
+        except (OSError, IndexError):
+            return None, None
+        if '|' in crudo:
+            host, _, pid = crudo.partition('|')
+            try:
+                return host, int(pid)
+            except ValueError:
+                return host, None
+        try:
+            return None, int(crudo)
+        except ValueError:
+            return None, None
 
 
 # --------------------------------------------------------------------------

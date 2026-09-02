@@ -121,6 +121,7 @@
 # ---------------------------------------------------------------
 
 import argparse
+import asyncio
 import csv
 import io
 import logging
@@ -128,6 +129,7 @@ from logging.handlers import RotatingFileHandler
 import os
 import platform
 import sys
+import threading
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -188,6 +190,21 @@ TOLERANCIA_SILENCIO_FRAC = 0.05
 # Cuantas ventanas seguidas se reparan de una tirada. Un hueco largo se trocea
 # para no monopolizar el presupuesto de un solo ciclo.
 VENTANAS_POR_TRAMO = 15
+
+# --- WebSocket (fuente primaria en vivo) -------------------------------------
+# El flush del WS corre en el hilo del bucle de eventos y la reparacion REST en
+# un executor. Ambos hacen leer-modificar-escribir sobre el MISMO CSV del dia:
+# sin este lock una pisa a la otra y se pierden ventanas enteras.
+_LOCK_ESCRITURA = threading.Lock()
+
+# Margen tras cerrar una ventana antes de volcarla: da tiempo a los trades que
+# caen dentro de ella pero llegan con retraso. Lo que aun asi se escape lo
+# repone la reparacion REST, que es la red de seguridad.
+GRACIA_FLUSH_MS = 3000
+
+# Si el WS no entrega nada en este tiempo se vuelve al bucle igualmente, para
+# que el flush y la reparacion sigan corriendo con el mercado parado.
+TIMEOUT_WS_S = 20.0
 
 
 # ---------------------------------------------------------------
@@ -434,7 +451,11 @@ def _fusionar_flujo(salida, coin, mercado, nuevas, sobrescribir, logger):
         por_dia.setdefault(_ruta(salida, "flujo", coin, mercado, fin - 1), {})[fin] = fila
 
     escritas = 0
-    for ruta, filas_nuevas in por_dia.items():
+    # El lock protege el leer-modificar-escribir completo, no solo la escritura:
+    # dos hilos leyendo el mismo dia antes de que ninguno escriba se pisarian
+    # aunque cada escritura por separado fuese atomica.
+    with _LOCK_ESCRITURA:
+      for ruta, filas_nuevas in por_dia.items():
         existentes = _leer_flujo(ruta)
         for fin, fila in filas_nuevas.items():
             if fin in existentes and not sobrescribir:
@@ -470,7 +491,8 @@ def _anexar_trades(salida, coin, mercado, trades, ventana_ms):
             "coin": coin,
         })
 
-    for ruta, filas in por_dia.items():
+    with _LOCK_ESCRITURA:
+      for ruta, filas in por_dia.items():
         nuevo = not os.path.exists(ruta)
         with open(ruta, "a", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=CAMPOS_TRADES)
@@ -612,10 +634,41 @@ def _crear_estructura(salida):
             open(gitkeep, "a").close()
 
 
+# Cuanto vale una marca del lock antes de considerarla de un proceso muerto.
+# Debe superar de sobra el ciclo mas lento (una reparacion larga).
+LOCK_VIGENCIA_S = 300
+
+
 def _tomar_lock(salida, monedas, mercado, logger):
-    """Dos instancias sobre la misma salida se pisarian al fusionar el dia."""
+    """Impide dos instancias escribiendo sobre la misma salida.
+
+    Dos mecanismos, porque uno solo no basta:
+
+    1. Lock del SO (fcntl / msvcrt). Fiable ENTRE PROCESOS DE LA MISMA
+       PLATAFORMA, pero NO entre ellas: este proyecto corre en el NAS (Linux,
+       fcntl) y se toca desde Windows por SMB (msvcrt). Son mecanismos
+       distintos que no se ven, asi que un proceso Windows arrancaba encima
+       del de Linux sin enterarse -- comprobado en vivo el 2026-09-02.
+
+    2. Marca host|pid|timestamp dentro del propio fichero, que el proceso vivo
+       refresca. Si la marca es reciente hay otro corriendo, venga de la
+       plataforma que venga. Es lo unico que cruza SMB.
+    """
     ruta = os.path.join(salida, ".flujo_%s_%s.lock" % (monedas, mercado))
-    arch = open(ruta, "a+")
+
+    try:
+        with open(ruta, "r", encoding="utf-8") as f:
+            partes = f.read().strip().split("|")
+        if len(partes) == 3 and (time.time() - float(partes[2])) < LOCK_VIGENCIA_S:
+            logger.error(
+                "Ya corre otra instancia sobre %s (host=%s pid=%s, marca de hace "
+                "%.0fs). Saliendo." % (salida, partes[0], partes[1],
+                                       time.time() - float(partes[2])))
+            sys.exit(1)
+    except (IOError, OSError, ValueError, IndexError):
+        pass  # sin fichero, ilegible o con formato viejo: se toma igualmente
+
+    arch = open(ruta, "w+", encoding="utf-8")
     try:
         if platform.system() == "Windows":
             msvcrt.locking(arch.fileno(), msvcrt.LK_NBLCK, 1)
@@ -625,7 +678,20 @@ def _tomar_lock(salida, monedas, mercado, logger):
         logger.error("Otra instancia ya corre sobre %s. Saliendo." % salida)
         arch.close()
         sys.exit(1)
+    _refrescar_lock(arch)
     return arch
+
+
+def _refrescar_lock(arch):
+    """Renueva la marca. Si se deja de llamar, a los LOCK_VIGENCIA_S el lock
+    se considera huerfano y otro proceso puede tomarlo."""
+    try:
+        arch.seek(0)
+        arch.truncate()
+        arch.write("%s|%d|%.0f" % (platform.node(), os.getpid(), time.time()))
+        arch.flush()
+    except (IOError, OSError):
+        pass
 
 
 def _soltar_lock(arch):
@@ -644,7 +710,7 @@ def _soltar_lock(arch):
 # ---------------------------------------------------------------
 
 def _modo_vivo(coins, mercado, ventana_ms, salida, cada, reparar_max,
-               auditar_cada, con_funding, logger):
+               auditar_cada, con_funding, logger, lock=None):
     simbolos = dict((c, _ex_simbolo(c)) for c in coins)
     ciclo = 0
     ultima_ventana = {}
@@ -716,12 +782,168 @@ def _modo_vivo(coins, mercado, ventana_ms, salida, cada, reparar_max,
                 _funding(simbolos[coin], coin, mercado,
                          ahora - 90 * 86400000, salida, logger)
 
+        if lock is not None:
+            _refrescar_lock(lock)
+
         dormir = cada - (time.time() - t_ciclo)
         if dormir > 0:
             time.sleep(dormir)
         else:
             logger.warning("ciclo %d tardo %.1fs, mas que la cadencia de %.0fs"
                            % (ciclo, time.time() - t_ciclo, cada))
+
+
+def _parche_dns():
+    """aiohttp elige AsyncResolver (aiodns) si esta instalado, y en Windows
+    falla con 'Could not contact DNS servers' aunque el cliente sincrono
+    resuelva sin problema. Hay que parchear aiohttp.connector, no
+    aiohttp.resolver: connector.py importa el simbolo al cargar el modulo, asi
+    que tocar el segundo no tiene ningun efecto.
+
+    Portable: en Linux el ThreadedResolver funciona igual, no hace falta
+    condicionar por plataforma."""
+    try:
+        import aiohttp.connector as _c
+        from aiohttp.resolver import ThreadedResolver
+        _c.DefaultResolver = ThreadedResolver
+    except ImportError:
+        pass
+
+
+def _volcar_cerradas(buffers, simbolo_coin, ventana_ms, ahora_ms, mercado,
+                     salida, logger, forzar=False):
+    """Escribe las ventanas ya cerradas que hay en el buffer y las saca de el.
+
+    Una ventana se considera cerrada cuando ha pasado GRACIA_FLUSH_MS desde su
+    fin: el WS puede entregar con retraso un trade cuyo timestamp cae dentro.
+    Lo que aun asi llegue tarde lo repone la reparacion REST."""
+    limite = ahora_ms if forzar else ahora_ms - GRACIA_FLUSH_MS
+    tope = (limite // ventana_ms) * ventana_ms
+    total = 0
+    for coin, buf in buffers.items():
+        if not buf:
+            continue
+        cerradas = {}
+        for tid in list(buf):
+            t = buf[tid]
+            fin = ((t["timestamp"] // ventana_ms) + 1) * ventana_ms
+            if fin <= tope:
+                cerradas.setdefault(fin, []).append(t)
+                del buf[tid]
+        if not cerradas:
+            continue
+        trades = sorted((t for lote in cerradas.values() for t in lote),
+                        key=lambda x: (x["timestamp"], str(x.get("id"))))
+        filas = _agregar(trades, ventana_ms, coin)
+        _fusionar_flujo(salida, coin, mercado, filas, True, logger)
+        _anexar_trades(salida, coin, mercado, trades, ventana_ms)
+        total += len(filas)
+        logger.info("[%s ws] %s | %d ventanas, %d trades"
+                    % (coin, _fmt(max(cerradas)), len(filas), len(trades)))
+    return total
+
+
+async def _bucle_ws(coins, mercado, ventana_ms, salida, reparar_max,
+                    auditar_cada, logger, lock=None):
+    """WebSocket como fuente primaria; REST solo para auditar y reponer.
+
+    El WS no puede reponer lo que se perdio mientras estaba caido: por eso la
+    reparacion por endTime sigue aqui, corriendo en un executor para no frenar
+    el consumo de trades. Es lo que convierte una desconexion en algo
+    reparable en vez de en un hueco definitivo."""
+    _parche_dns()
+    try:
+        import ccxt.pro as ccxtpro
+    except ImportError:
+        raise SystemExit("ccxt.pro no disponible: hace falta ccxt >= 4 para --ws")
+
+    ex = ccxtpro.bitget({"enableRateLimit": True, "options": {"defaultType": "swap"}})
+    await ex.load_markets()
+    simbolos = dict((c, _ex_simbolo(c)) for c in coins)
+    por_simbolo = dict((v, k) for k, v in simbolos.items())
+    buffers = dict((c, {}) for c in coins)
+    pendientes = dict((c, []) for c in coins)
+    tarea_rep = None
+    ciclo = 0
+    # get_running_loop y no get_event_loop: el segundo dejo de crear bucle
+    # implicito en 3.12+. Y run_in_executor y no asyncio.to_thread, que es 3.9+
+    # mientras que el venv del servidor es 3.8. Ambas valen en 3.8 y en 3.14.
+    loop = asyncio.get_running_loop()
+
+    logger.info("modo vivo WS: ventana %ds, reparacion <=%ds, auditoria cada %d vueltas"
+                % (ventana_ms / 1000, reparar_max, auditar_cada))
+
+    def _reponer(coin):
+        """Corre en un hilo aparte: REST sincrono, no toca el bucle de eventos."""
+        ahora = int(time.time() * 1000)
+        pared = ahora - VENTANA_HISTORICO_DIAS * 86400000 + MARGEN_PARED_MS
+        tope = (ahora // ventana_ms) * ventana_ms - ventana_ms
+        if not pendientes[coin]:
+            pendientes[coin] = _huecos(salida, coin, mercado, pared, tope, ventana_ms)
+            if pendientes[coin]:
+                n = sum((b - a) // ventana_ms + 1 for a, b in pendientes[coin])
+                logger.info("[%s] auditoria: %d ventanas a reponer en %d tramos"
+                            % (coin, n, len(pendientes[coin])))
+        if not pendientes[coin]:
+            return 0
+        rep, _, queda = _reparar_tramos(simbolos[coin], coin, mercado, pendientes[coin],
+                                        ventana_ms, salida, False, logger,
+                                        presupuesto_s=reparar_max)
+        pendientes[coin] = queda
+        return rep
+
+    try:
+        while True:
+            ciclo += 1
+            try:
+                trades = await asyncio.wait_for(
+                    ex.watch_trades_for_symbols(list(simbolos.values())),
+                    timeout=TIMEOUT_WS_S)
+                for t in trades:
+                    coin = por_simbolo.get(t.get("symbol"))
+                    if coin and t.get("id") is not None:
+                        buffers[coin][t["id"]] = t
+            except asyncio.TimeoutError:
+                # Mercado parado o WS mudo: no es un error, se sigue para que
+                # el volcado y la reparacion no se queden bloqueados.
+                pass
+            except Exception as e:
+                logger.error("ws: %s" % str(e)[:200])
+                await asyncio.sleep(5)
+                continue
+
+            _volcar_cerradas(buffers, por_simbolo, ventana_ms,
+                             int(time.time() * 1000), mercado, salida, logger)
+            if lock is not None:
+                _refrescar_lock(lock)
+
+            # La reparacion va en segundo plano y de una en una: si ya hay una
+            # corriendo no se lanza otra, para no duplicar peticiones ni pelear
+            # por el lock de escritura.
+            if (tarea_rep is None or tarea_rep.done()) and ciclo % auditar_cada == 1:
+                if tarea_rep is not None and tarea_rep.done():
+                    try:
+                        n = tarea_rep.result()
+                        if n:
+                            logger.info("[%s] %d ventanas repuestas" % (coins[0], n))
+                    except Exception as e:
+                        logger.error("reparar: %s" % str(e)[:200])
+                tarea_rep = loop.run_in_executor(None, _reponer, coins[0])
+    finally:
+        # Al salir se vuelca lo que quede: si no, el ultimo minuto se perderia
+        # hasta que la reparacion lo detectase.
+        try:
+            _volcar_cerradas(buffers, por_simbolo, ventana_ms,
+                             int(time.time() * 1000), mercado, salida, logger, forzar=True)
+        finally:
+            await ex.close()
+
+
+def _modo_vivo_ws(coins, mercado, ventana_ms, salida, reparar_max, auditar_cada,
+                  logger, lock=None):
+    asyncio.run(
+        _bucle_ws(coins, mercado, ventana_ms, salida, reparar_max, auditar_cada,
+                  logger, lock))
 
 
 def _modo_reparacion(coins, mercado, desde_ms, hasta_ms, ventana_ms, salida,
@@ -746,6 +968,9 @@ def main():
     )
     p.add_argument("monedas", nargs="?", default="eth", help="monedas separadas por coma (default: eth)")
     p.add_argument("--loop", action="store_true", help="modo vivo continuo")
+    p.add_argument("--ws", action="store_true",
+                   help="en modo vivo, usar WebSocket como fuente primaria "
+                        "(REST queda solo para auditar y reponer huecos)")
     p.add_argument("--cada", type=float, default=60.0, help="segundos por ventana (default: 60)")
     p.add_argument("--reparar-max", type=float, default=20.0,
                    help="segundos de reparacion por ciclo en modo vivo (default: 20)")
@@ -779,12 +1004,19 @@ def main():
         if args.loop:
             if args.desde or args.hasta:
                 logger.warning("--desde/--hasta se ignoran en modo --loop")
-            logger.info("flujo %s %s | ventana %.0fs | salida %s"
-                        % (",".join(coins), args.mercado, args.cada, args.salida))
+            logger.info("flujo %s %s | ventana %.0fs | fuente %s | salida %s"
+                        % (",".join(coins), args.mercado, args.cada,
+                           "WebSocket (REST repara)" if args.ws else "REST", args.salida))
             logger.info("caduca lo anterior a %s"
                         % _fmt(ahora - VENTANA_HISTORICO_DIAS * 86400000))
-            _modo_vivo(coins, args.mercado, ventana_ms, args.salida, args.cada,
-                       args.reparar_max, args.auditar_cada, args.funding, logger)
+            if args.ws:
+                # El WS no espacia por --cada: entrega segun llega. --cada solo
+                # define el ancho de la ventana de agregado.
+                _modo_vivo_ws(coins, args.mercado, ventana_ms, args.salida,
+                              args.reparar_max, args.auditar_cada, logger, lock)
+            else:
+                _modo_vivo(coins, args.mercado, ventana_ms, args.salida, args.cada,
+                           args.reparar_max, args.auditar_cada, args.funding, logger, lock)
         else:
             hasta_ms = _parsear_fecha(args.hasta, "hasta") if args.hasta else ahora
             desde_ms = _parsear_fecha(args.desde, "desde") if args.desde else pared
