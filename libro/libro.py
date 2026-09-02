@@ -60,6 +60,15 @@
 #       coin: moneda
 #       imbalance, imbalance_niveles: desequilibrio del libro FINO en [-1,+1]
 #       imbalance_amplio: lo mismo sobre el libro agrupado (~±4%)
+#       last_price: ultimo precio negociado del perpetuo
+#       mark_price: precio de marca (contra el que se disparan las liquidaciones)
+#       index_price: precio indice (cesta de spot)
+#         La BASE se calcula como (last_price - index_price) / index_price.
+#         Negativa = el perpetuo cotiza por debajo del contado, es decir cortos
+#         pagando por estarlo. Es la medida directa del apetito apalancado, y
+#         mark/index tienen historico propio en Bitget desde 2019 via
+#         fetch_mark_ohlcv / fetch_index_ohlcv, asi que se puede backtestear
+#         sin esperar a acumular.
 #       open_interest, funding_rate_pct, long_short_ratio: metadata del exchange
 #       session_id: timestamp de arranque del proceso. Marca discontinuidades
 #                   de la serie; ya no gobierna ninguna acumulacion
@@ -70,6 +79,10 @@
 #   - El libro fino alcanza solo ~7 bps a cada lado: su imbalance no predice el
 #     precio (medido: corr -0.021 a 15 min sobre 511 snapshots). Para
 #     posicionamiento hay que mirar imbalance_amplio.
+#   - last/mark/index vienen del ticker, que trae ademas holdingAmount y
+#     fundingRate identicos a los de sus endpoints dedicados. NO se usan de ahi
+#     a proposito: el OI es irrecuperable y no conviene que un fallo del ticker
+#     se lleve OI, funding y precios de una vez.
 #   - funding_rate_pct se actualiza cada 300+ s (congelado entre updates).
 #   - long_short_ratio es horario (endpoint Bitget es de resolucion 1h).
 #   - Un hueco en esta serie NO se puede reponer. Es el unico proceso del
@@ -112,6 +125,7 @@ DIR_TEST = os.path.join(DIR_BASE, "test")
 CAMPOS_CSV = [
     "timestamp_local_ms", "fecha_utc", "timestamp_exchange_ms", "estado", "coin",
     "imbalance", "imbalance_niveles", "imbalance_amplio",
+    "last_price", "mark_price", "index_price",
     "open_interest", "funding_rate_pct", "long_short_ratio", "session_id",
     "bids_json", "asks_json",
     "bids_amplio_json", "asks_amplio_json",
@@ -192,6 +206,38 @@ def _ex_libro(simbolo, depth, precision=None):
         'bids': ob.get('bids', []),
         'asks': ob.get('asks', []),
         'timestamp': ob.get('timestamp'),
+    }
+
+
+def _ex_ticker(simbolo):
+    """last / mark / index en una sola peticion.
+
+    Los tres son necesarios y ninguno estaba: el CSV solo tenia el mejor bid y
+    ask del libro. Importan por dos motivos concretos:
+      - las liquidaciones se disparan contra el MARK, no contra el ultimo precio
+      - la base (last - index) / index mide el apetito apalancado: si el
+        perpetuo cotiza por debajo del contado, hay cortos pagando por estarlo
+    El ticker trae ademas holdingAmount y fundingRate, identicos a los de
+    fetch_open_interest y fetch_funding_rate (comprobado). No se usan de aqui a
+    proposito: el OI es irrecuperable y no conviene que un fallo del ticker se
+    lleve por delante OI, funding y precios a la vez."""
+    t = _ex_cliente().fetch_ticker(simbolo)
+    info = t.get('info') or {}
+
+    def num(*claves):
+        for k in claves:
+            v = info.get(k) if k in info else t.get(k)
+            if v not in (None, ''):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    return {
+        'last': num('lastPr', 'last'),
+        'mark': num('markPrice'),
+        'index': num('indexPrice'),
     }
 
 
@@ -403,6 +449,14 @@ def _fila(coin, simbolo, profundidad, funding_cache, funding_cada,
         logger.warning(f"libro amplio {coin}: {e}")
         libro_amplio = None
 
+    # Informativo: si falla, la fila sigue siendo valida (el libro y el OI son
+    # lo irrecuperable, no los precios de referencia).
+    try:
+        precios = _ex_ticker(simbolo)
+    except Exception as e:
+        logger.warning(f"ticker {coin}: {e}")
+        precios = {}
+
     try:
         oi = _ex_open_interest(simbolo)
     except Exception as e:
@@ -431,6 +485,9 @@ def _fila(coin, simbolo, profundidad, funding_cache, funding_cada,
         "imbalance": _imbalance(libro, niveles=profundidad) if libro else "",
         "imbalance_niveles": profundidad,
         "imbalance_amplio": _imbalance(libro_amplio, niveles=profundidad) if libro_amplio else "",
+        "last_price": precios.get("last") if precios.get("last") is not None else "",
+        "mark_price": precios.get("mark") if precios.get("mark") is not None else "",
+        "index_price": precios.get("index") if precios.get("index") is not None else "",
         "open_interest": oi if oi is not None else "",
         "funding_rate_pct": funding if funding is not None else "",
         "long_short_ratio": ls_ratio if ls_ratio is not None else "",

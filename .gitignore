@@ -31,3 +31,9 @@ niveles/logs/*
 
 # Locks de ejecucion
 *.lock
+
+# Volcados de credenciales pegados desde el navegador (el 2026-09-02 quedo
+# un env.txt con la API key y el secreto en claro dentro del repo)
+env.txt
+*.env.txt
+env_*.txt
