@@ -112,6 +112,9 @@ def cargar_indicadores_tf_vivo(coin: str, mercado: str, tf: str, n: int) -> Opti
     highs = [v['high'] for v in velas]
     lows = [v['low'] for v in velas]
     volumes = [v['vol'] for v in velas]
+    # Instante al que corresponde 'close': la ultima vela usada esta CERRADA,
+    # asi que su cierre es su apertura mas un periodo.
+    ts_cierre_ms = velas[-1]['ts'] + _tf_a_ms(tf)
 
     sma = indicadores.sma(closes, periodo=len(closes))[-1]
     rsi_periodo = min(14, len(closes) - 1)
@@ -132,6 +135,7 @@ def cargar_indicadores_tf_vivo(coin: str, mercado: str, tf: str, n: int) -> Opti
         'trend': "UP" if current_price > sma else "DOWN",
         'vol_ratio': float(current_vol / avg_vol) if avg_vol > 0 else 0.0,
         'rsi': float(rsi),
+        'ts_cierre_ms': ts_cierre_ms,
     }
 
 
@@ -516,8 +520,20 @@ def run_analysis_vivo(coin: str, mercado: str, tf: str, niveles_tf: str = None) 
         logger.error("Could not evaluate setup")
         return False
 
+    # 'timestamp' es el CIERRE DE LA VELA a la que corresponde 'price', no el
+    # reloj de pared. Antes se guardaba datetime.now(): en un TF de 15m eso
+    # significaba que 'timestamp' podia ir hasta 15 min por delante del precio
+    # que lo acompanaba, y el backtest entraba a ese precio viejo empezando a
+    # medir desde el instante posterior. Los minutos intermedios no se
+    # capturaban ni se arriesgaban, y el sesgo NO era neutro: las senales de
+    # momentum disparan DESPUES de que el precio se mueva, asi que la entrada
+    # quedaba sistematicamente del lado favorable.
+    # El reloj de pared se guarda aparte, en 'ts_ejecucion', que si sirve para
+    # diagnosticar retrasos del proceso.
     record = {
-        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'timestamp': datetime.fromtimestamp(
+            principal['ts_cierre_ms'] / 1000, timezone.utc).isoformat(),
+        'ts_ejecucion': datetime.now(timezone.utc).isoformat(),
         'tf': tf,
         'signal': setup['signal'],
         # La señal se sigue calculando y registrando (hace falta para poder
@@ -610,7 +626,11 @@ def run_analysis_hist(coin: str, mercado: str, tf: str, as_of: pd.Timestamp,
         return None
 
     return {
+        # En replay 'as_of' YA es una frontera de vela, asi que coincide con el
+        # cierre al que corresponde 'price'. Se anade ts_ejecucion para que las
+        # dos fuentes de log tengan el mismo esquema.
         'timestamp': as_of.isoformat(),
+        'ts_ejecucion': datetime.now(timezone.utc).isoformat(),
         'tf': tf,
         'signal': setup['signal'],
         # La señal se sigue calculando y registrando (hace falta para poder
