@@ -109,11 +109,15 @@ def get_fees(coin='ETH'):
 
     try:
         contrato = obtener_contrato(f'{coin.upper()}/USDT:USDT')
+        # 'fuente' dice de donde salen de VERDAD: 'cuenta' (tramo VIP real,
+        # con credenciales), 'mercado' (tarifa publica del par) o 'estimado'
+        # (los defaults). Antes ponia siempre 'contrato' aunque la peticion
+        # hubiera fallado y se estuvieran usando los defaults.
         return {
             'taker': contrato['comision_taker'],
             'maker': contrato['comision_maker'],
-            'slippage': 0.0003,  # Estimado (no viene del contrato)
-            'fuente': 'contrato',
+            'slippage': 0.0003,  # Estimado: no lo expone ningun endpoint
+            'fuente': contrato.get('comision_fuente', 'estimado'),
         }
     except Exception as e:
         logger.warning(f"Error leyendo contrato: {e}, usando defaults")
@@ -321,9 +325,30 @@ def evaluate_prediction(row, price_data, exec_tf='5m', hours_ahead=1, fees=None,
         'fee_fuente': pnl_data['fee_fuente'],
     }
 
+def _localizar_log(tf, fuente='auto'):
+    """CSV de senales a backtestear.
+
+    analyzer.py escribe en DOS sitios distintos: el modo vivo en
+    eth_setup_log_<tf>.csv y el replay en eth_setup_hist_log_<tf>.csv. El
+    backtest solo miraba el primero, asi que un replay recien corrido no se
+    podia backtestear: leia el log de produccion, o daba "No data" si no
+    existia. Con 'auto' se coge el mas reciente de los dos y se dice cual.
+    """
+    vivo = DATA_DIR / f"eth_setup_log_{tf}.csv"
+    hist = DATA_DIR / f"eth_setup_hist_log_{tf}.csv"
+    if fuente == 'vivo':
+        return vivo
+    if fuente == 'replay':
+        return hist
+    cands = [p for p in (hist, vivo) if p.exists()]
+    if not cands:
+        return vivo
+    return max(cands, key=lambda p: p.stat().st_mtime)
+
+
 def backtest_tf_dynamic(tf, hours_ahead=1, initial_capital=25, margin_pct=0.10,
                          coin='ETH', mercado='futuros', exec_tf='5m',
-                         sl_pct=0.03, tp_pct=0.10):
+                         sl_pct=0.03, tp_pct=0.10, fuente='auto'):
     """Backtest con margen aislado por operación, una posición a la vez.
 
     Cada trade arriesga 'initial_capital' USDT de margen (apalancamiento
@@ -352,11 +377,12 @@ def backtest_tf_dynamic(tf, hours_ahead=1, initial_capital=25, margin_pct=0.10,
     la realidad seguiria activa. Con hours_ahead=None esto es mas frecuente
     (no hay plazo que la fuerce a cerrar).
     """
-    csv_file = DATA_DIR / f"eth_setup_log_{tf}.csv"
-    
+    csv_file = _localizar_log(tf, fuente)
+
     if not csv_file.exists():
-        print(f"[AVISO] No data for {tf}")
+        print(f"[AVISO] No data for {tf} (buscado: {csv_file.name})")
         return False
+    print(f"[FUENTE] {csv_file.name}")
     
     # Cargar análisis
     try:
@@ -602,6 +628,9 @@ Examples:
                        help='Vela usada para el precio de entrada/salida (default: 5m, por precision)')
     parser.add_argument('--stop-pct', type=_fraccion_margen, default=0.03,
                        help='Stop-loss como fraccion del precio de entrada, en (0,1] (default: 0.03 = 3%%)')
+    parser.add_argument('--fuente-log', type=str, default='auto', choices=['auto','vivo','replay'],
+                        help='Que log de senales backtestear: vivo (eth_setup_log), '
+                             'replay (eth_setup_hist_log) o auto = el mas reciente (default)')
     parser.add_argument('--take-profit-pct', type=_fraccion_margen, default=0.10,
                        help='Take-profit como fraccion del precio de entrada, en (0,1] (default: 0.10 = 10%%)')
     
@@ -622,7 +651,8 @@ Examples:
         for tf in tfs:
             ok_todos &= backtest_tf_dynamic(tf, hours_ahead, args.capital, args.margin_pct,
                                              args.coin, args.mercado, args.exec_tf,
-                                             args.stop_pct, args.take_profit_pct)
+                                             args.stop_pct, args.take_profit_pct,
+                                             args.fuente_log)
 
         if not ok_todos:
             print("[AVISO] Al menos un TF terminó en RUINA o sin datos (ver ESTADO arriba)")

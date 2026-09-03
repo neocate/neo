@@ -32,6 +32,13 @@ import pandas as pd
 
 SCRIPT_DIR = Path(__file__).parent
 BASE_DIR = SCRIPT_DIR.parent  # neo/
+# Los logs van en UTC, como los datos. velas_bit.py ya lo hacia asi por un
+# motivo bueno: "una linea del log y una vela se cruzan sin conversiones de por
+# medio". El resto usaba hora local, asi que correlacionar un incidente entre
+# modulos obligaba a sumar o restar horas a ojo -- y en un NAS que ademas se
+# toca desde otra maquina, a adivinar de que huso era cada marca.
+logging.Formatter.converter = time.gmtime
+
 LIBRO_DIR = BASE_DIR / "libro" / "datos"
 FLUJO_DIR = LIBRO_DIR / "flujo"
 VELAS_DIR = BASE_DIR / "velas"
@@ -306,13 +313,53 @@ def cargar_indicadores_tf_hist(coin: str, mercado: str, tf: str, n: int, as_of_m
     }
 
 
+# Por debajo de esta cobertura, una columna se avisa al cargarla.
+COBERTURA_MINIMA_COLUMNA = 0.95
+
+
+def _guardar_csv_atomico(df: pd.DataFrame, ruta) -> None:
+    """Escribe a .tmp y renombra.
+
+    En modo --loop este CSV se reescribe ENTERO en cada vuelta (se relee, se
+    concatena la fila nueva y se vuelca). Matar el proceso a mitad del volcado
+    dejaba un fichero truncado que ya no se podia releer: se perdia todo el
+    historico de senales acumulado, no solo la fila en curso. os.replace es
+    atomico en el mismo sistema de ficheros."""
+    tmp = ruta.with_suffix(ruta.suffix + '.tmp')
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, ruta)
+
+
 def _concat_hist(directorio, patron: str, etiqueta: str) -> pd.DataFrame:
+    """Concatena los CSV del historico avisando de la cobertura parcial.
+
+    El esquema de libro.py ha crecido con el tiempo (13 -> 16 -> 19 columnas:
+    imbalance_amplio en el 01/09, last/mark/index en el 02/09). pandas rellena
+    con NaN las columnas que no existian y NO da ningun error, asi que un
+    analisis sobre 'last_price' podia estar corriendo sobre el 11% de las filas
+    creyendo que las tenia todas. Los CSV ya estan normalizados al esquema
+    actual, pero las filas antiguas siguen sin esos valores -- que es la verdad:
+    entonces no se grababan. Lo que faltaba era decirlo en voz alta."""
     archivos = sorted(directorio.glob(patron))
     if not archivos:
         raise FileNotFoundError(f"No hay CSV de {etiqueta} en {directorio} ({patron})")
     df = pd.concat([pd.read_csv(f) for f in archivos], ignore_index=True)
     df['fecha_utc'] = pd.to_datetime(df['fecha_utc'], utc=True)
-    return df.sort_values('fecha_utc').reset_index(drop=True)
+    df = df.sort_values('fecha_utc').reset_index(drop=True)
+
+    parciales = []
+    for col in df.columns:
+        if col in ('fecha_utc', 'estado', 'coin'):
+            continue
+        cob = df[col].notna().mean()
+        if cob < COBERTURA_MINIMA_COLUMNA:
+            parciales.append((col, cob))
+    if parciales:
+        detalle = ", ".join(f"{c} {cob:.0%}" for c, cob in sorted(parciales, key=lambda x: x[1]))
+        logger.warning(
+            f"{etiqueta}: {len(df)} filas, columnas con cobertura PARCIAL -> {detalle}. "
+            f"Cualquier medida sobre ellas usa solo esa fraccion de la muestra.")
+    return df
 
 
 def cargar_libro_completo_hist(coin: str, mercado: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -512,7 +559,7 @@ def run_analysis_vivo(coin: str, mercado: str, tf: str, niveles_tf: str = None) 
             df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
         else:
             df = pd.DataFrame([record])
-        df.to_csv(analysis_csv, index=False)
+        _guardar_csv_atomico(df, analysis_csv)
 
         logger.info(f"{setup['signal']:5s} | Conf: {setup['confidence']:.0%} | "
                     f"Price: {principal['close']:.2f} | Vol: {principal['vol_ratio']:.2f}x | "
@@ -720,7 +767,7 @@ def main():
 
             df = pd.DataFrame(filas)
             out_csv = DATA_DIR / f"eth_setup_hist_log_{args.tf}.csv"
-            df.to_csv(out_csv, index=False)
+            _guardar_csv_atomico(df, out_csv)
 
             conteo = df['signal'].value_counts()
             logger.info(f"{len(df)} filas evaluadas -> {out_csv}")

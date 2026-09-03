@@ -72,6 +72,7 @@ def obtener_contrato(simbolo):
             'simbolo': simbolo,
             'comision_maker': comisiones.get('maker', 0.0002),
             'comision_taker': comisiones.get('taker', 0.0006),
+            'comision_fuente': comisiones.get('fuente', 'estimado'),
             'minimo_cantidad': mercado.get('limits', {}).get('amount', {}).get('min', 0.0001),
             'minimo_valor': mercado.get('limits', {}).get('cost', {}).get('min', 5),
             'precision_cantidad': mercado.get('precision', {}).get('amount', 8),
@@ -86,16 +87,38 @@ def obtener_contrato(simbolo):
         raise ValueError(f"Error leyendo contrato {simbolo}: {e}")
 
 def _leer_comisiones(cliente, simbolo):
-    """Lee comisiones maker/taker del par."""
+    """Comisiones maker/taker del par, diciendo de DONDE salen.
+
+    Antes llamaba a fetch_trading_feeS(simbolo): esa funcion es PLURAL, no
+    lleva simbolo y devuelve todos los pares. Pasarselo lo colaba como
+    'params' y reventaba con "'str' object has no attribute 'keys'". El
+    except desnudo se lo tragaba y devolvia los defaults, pero contrato.py
+    seguia diciendo que venian del contrato: todos los backtests reportaban
+    comisiones "reales" que en realidad eran estimadas.
+
+    Orden de preferencia:
+      1. fetch_trading_fee (SINGULAR) -> el tramo VIP real de la cuenta,
+         pero necesita credenciales.
+      2. market['maker'/'taker'] -> tarifa publica del par, ya cargada por
+         load_markets, sin peticion adicional ni auth.
+      3. defaults, solo si las dos anteriores fallan.
+    """
+    if cliente.apiKey:
+        try:
+            f = cliente.fetch_trading_fee(simbolo)
+            if f.get('maker') is not None and f.get('taker') is not None:
+                return {'maker': float(f['maker']), 'taker': float(f['taker']),
+                        'fuente': 'cuenta'}
+        except Exception:
+            pass
     try:
-        fees = cliente.fetch_trading_fees(simbolo)
-        return {
-            'maker': fees.get('maker', 0.0002),
-            'taker': fees.get('taker', 0.0006),
-        }
-    except:
-        # Default Bitget
-        return {'maker': 0.0002, 'taker': 0.0006}
+        m = cliente.market(simbolo)
+        if m.get('maker') is not None and m.get('taker') is not None:
+            return {'maker': float(m['maker']), 'taker': float(m['taker']),
+                    'fuente': 'mercado'}
+    except Exception:
+        pass
+    return {'maker': 0.0002, 'taker': 0.0006, 'fuente': 'estimado'}
 
 def _leer_leverage(mercado):
     """Lee límites de apalancamiento y margen del mercado."""

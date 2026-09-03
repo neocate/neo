@@ -145,6 +145,13 @@ else:
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
+# Los logs van en UTC, como los datos. velas_bit.py ya lo hacia asi por un
+# motivo bueno: "una linea del log y una vela se cruzan sin conversiones de por
+# medio". El resto usaba hora local, asi que correlacionar un incidente entre
+# modulos obligaba a sumar o restar horas a ojo -- y en un NAS que ademas se
+# toca desde otra maquina, a adivinar de que huso era cada marca.
+logging.Formatter.converter = time.gmtime
+
 DIR_BASE = os.path.dirname(os.path.abspath(__file__))
 DIR_DATOS = os.path.join(DIR_BASE, "datos")
 DIR_LOGS = os.path.join(DIR_BASE, "logs")
@@ -225,9 +232,19 @@ def _ex_cliente():
     return _cliente
 
 
-def _ex_simbolo(coin):
-    """'eth' -> 'ETH/USDT:USDT' (perpetuo USDT-M)."""
-    return "{}/USDT:USDT".format(coin.upper())
+def _ex_simbolo(coin, mercado="futuros"):
+    """'eth' -> 'ETH/USDT:USDT' en futuros, 'ETH/USDT' en spot.
+
+    Antes devolvia SIEMPRE el perpetuo y 'mercado' solo entraba en el nombre
+    del fichero: con --mercado spot se grababa libro_ETH_spot_*.csv lleno de
+    datos de perpetuo. El fichero mentia sobre su contenido, que es la peor
+    clase de bug en un historico que luego se analiza a ciegas.
+
+    En spot no existen open interest, funding ni long/short ratio: esas
+    columnas quedan vacias (cada llamada ya tiene su try/except y escribe "").
+    """
+    return ("{}/USDT".format(coin.upper()) if mercado == "spot"
+            else "{}/USDT:USDT".format(coin.upper()))
 
 
 def _ex_trades_hasta(simbolo, fin_ms=None, limite=TRADES_LIMITE):
@@ -711,7 +728,7 @@ def _soltar_lock(arch):
 
 def _modo_vivo(coins, mercado, ventana_ms, salida, cada, reparar_max,
                auditar_cada, con_funding, logger, lock=None):
-    simbolos = dict((c, _ex_simbolo(c)) for c in coins)
+    simbolos = dict((c, _ex_simbolo(c, mercado)) for c in coins)
     ciclo = 0
     ultima_ventana = {}
     # Cola de huecos por moneda. Auditar (escanear los CSV de 7 dias) es caro y
@@ -859,7 +876,7 @@ async def _bucle_ws(coins, mercado, ventana_ms, salida, reparar_max,
 
     ex = ccxtpro.bitget({"enableRateLimit": True, "options": {"defaultType": "swap"}})
     await ex.load_markets()
-    simbolos = dict((c, _ex_simbolo(c)) for c in coins)
+    simbolos = dict((c, _ex_simbolo(c, mercado)) for c in coins)
     por_simbolo = dict((v, k) for k, v in simbolos.items())
     buffers = dict((c, {}) for c in coins)
     pendientes = dict((c, []) for c in coins)
@@ -874,7 +891,9 @@ async def _bucle_ws(coins, mercado, ventana_ms, salida, reparar_max,
                 % (ventana_ms / 1000, reparar_max, auditar_cada))
 
     def _reponer(coin):
-        """Corre en un hilo aparte: REST sincrono, no toca el bucle de eventos."""
+        """Corre en un hilo aparte: REST sincrono, no toca el bucle de eventos.
+        Devuelve (coin, ventanas_repuestas) para que quien lo lance sepa de
+        que moneda era el resultado."""
         ahora = int(time.time() * 1000)
         pared = ahora - VENTANA_HISTORICO_DIAS * 86400000 + MARGEN_PARED_MS
         tope = (ahora // ventana_ms) * ventana_ms - ventana_ms
@@ -885,12 +904,12 @@ async def _bucle_ws(coins, mercado, ventana_ms, salida, reparar_max,
                 logger.info("[%s] auditoria: %d ventanas a reponer en %d tramos"
                             % (coin, n, len(pendientes[coin])))
         if not pendientes[coin]:
-            return 0
+            return coin, 0
         rep, _, queda = _reparar_tramos(simbolos[coin], coin, mercado, pendientes[coin],
                                         ventana_ms, salida, False, logger,
                                         presupuesto_s=reparar_max)
         pendientes[coin] = queda
-        return rep
+        return coin, rep
 
     try:
         while True:
@@ -919,16 +938,19 @@ async def _bucle_ws(coins, mercado, ventana_ms, salida, reparar_max,
 
             # La reparacion va en segundo plano y de una en una: si ya hay una
             # corriendo no se lanza otra, para no duplicar peticiones ni pelear
-            # por el lock de escritura.
+            # por el lock de escritura. Se ROTA entre monedas: antes se pasaba
+            # siempre coins[0] y con dos o mas monedas las demas no se reparaban
+            # nunca en modo --ws.
             if (tarea_rep is None or tarea_rep.done()) and ciclo % auditar_cada == 1:
                 if tarea_rep is not None and tarea_rep.done():
                     try:
-                        n = tarea_rep.result()
+                        rep_coin, n = tarea_rep.result()
                         if n:
-                            logger.info("[%s] %d ventanas repuestas" % (coins[0], n))
+                            logger.info("[%s] %d ventanas repuestas" % (rep_coin, n))
                     except Exception as e:
                         logger.error("reparar: %s" % str(e)[:200])
-                tarea_rep = loop.run_in_executor(None, _reponer, coins[0])
+                objetivo = coins[(ciclo // max(auditar_cada, 1)) % len(coins)]
+                tarea_rep = loop.run_in_executor(None, _reponer, objetivo)
     finally:
         # Al salir se vuelca lo que quede: si no, el ultimo minuto se perderia
         # hasta que la reparacion lo detectase.
@@ -949,7 +971,7 @@ def _modo_vivo_ws(coins, mercado, ventana_ms, salida, reparar_max, auditar_cada,
 def _modo_reparacion(coins, mercado, desde_ms, hasta_ms, ventana_ms, salida,
                      sobrescribir, con_funding, logger):
     for coin in coins:
-        simbolo = _ex_simbolo(coin)
+        simbolo = _ex_simbolo(coin, mercado)
         t0 = time.time()
         rep, tr = _reparar(simbolo, coin, mercado, desde_ms, hasta_ms, ventana_ms,
                            salida, sobrescribir, logger)

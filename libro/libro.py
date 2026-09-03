@@ -117,6 +117,13 @@ else:
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
+# Los logs van en UTC, como los datos. velas_bit.py ya lo hacia asi por un
+# motivo bueno: "una linea del log y una vela se cruzan sin conversiones de por
+# medio". El resto usaba hora local, asi que correlacionar un incidente entre
+# modulos obligaba a sumar o restar horas a ojo -- y en un NAS que ademas se
+# toca desde otra maquina, a adivinar de que huso era cada marca.
+logging.Formatter.converter = time.gmtime
+
 DIR_BASE = os.path.dirname(os.path.abspath(__file__))
 DIR_DATOS = os.path.join(DIR_BASE, "datos")
 DIR_LOGS = os.path.join(DIR_BASE, "logs")
@@ -191,9 +198,19 @@ def _ex_cliente():
     return _cliente
 
 
-def _ex_simbolo(coin):
-    """'eth' -> 'ETH/USDT:USDT' (perpetuo USDT-M)."""
-    return f"{coin.upper()}/USDT:USDT"
+def _ex_simbolo(coin, mercado="futuros"):
+    """'eth' -> 'ETH/USDT:USDT' en futuros, 'ETH/USDT' en spot.
+
+    Antes devolvia SIEMPRE el perpetuo y 'mercado' solo entraba en el nombre
+    del fichero: con --mercado spot se grababa libro_ETH_spot_*.csv lleno de
+    datos de perpetuo. El fichero mentia sobre su contenido, que es la peor
+    clase de bug en un historico que luego se analiza a ciegas.
+
+    En spot no existen open interest, funding ni long/short ratio: esas
+    columnas quedan vacias (cada llamada ya tiene su try/except y escribe "").
+    """
+    return ("{}/USDT".format(coin.upper()) if mercado == "spot"
+            else "{}/USDT:USDT".format(coin.upper()))
 
 
 def _ex_libro(simbolo, depth, precision=None):
@@ -553,7 +570,7 @@ def main():
             f"~{2 * 86400 / cada * 4 / 1024:.0f} MB/dia. Se recomienda >=300s."
         )
 
-    simbolos = {c: _ex_simbolo(c) for c in coins}
+    simbolos = {c: _ex_simbolo(c, mercado) for c in coins}
     session_id = int(datetime.now(timezone.utc).timestamp() * 1000)
     gap_maximo_s = cada * MAX_GAP_FACTOR
 
