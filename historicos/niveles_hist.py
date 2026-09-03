@@ -50,10 +50,27 @@
 #     --ventana  velas que ve cada recalculo (default 4000)
 #     --desde    YYYY-MM-DD, por defecto el origen del CSV de velas
 #
+#   Parametros del algoritmo (por defecto: los de params_<coin>_<tf>.json si
+#   existe, si no los de produccion k=5/toques_min=3/etc, ver CFG_BASE).
+#   Si se pasa CUALQUIERA de estos, el fichero de salida lleva un sufijo con
+#   los valores que difieren del base, para no mezclar series con distinta
+#   configuracion en el mismo CSV incremental:
+#
+#     --k               sensibilidad de extremos locales (mas alto = menos niveles)
+#     --toques-min       toques minimos para que un nivel cuente
+#     --tolerancia-atr   ancho de banda alrededor del nivel, en ATR
+#     --confirmacion-velas  velas de cierre fuera de banda para confirmar rotura
+#     --periodo-atr      periodo del ATR
+#     --max-dist-pct     distancia maxima al precio para que el nivel sea util
+#     --max-antig-dias   antiguedad maxima del ultimo toque
+#     --separacion-min-atr  separacion minima entre niveles fusionados, en ATR
+#
 # Ejemplos:
 #   python historicos/niveles_hist.py eth 1h
 #   python historicos/niveles_hist.py btc 4h --ventana 3000
 #   python historicos/niveles_hist.py icp 1h --cada 12
+#   python historicos/niveles_hist.py eth 1h --k 8 --toques-min 5
+#   python historicos/niveles_hist.py eth 1h --k 3 --toques-min 2
 #
 # Coste: ~0,7 s por recalculo con ventana de 4000. Un activo en 1h desde
 # 2019 son ~2.400 recalculos diarios, unos 30 min. Lanzalo en segundo plano.
@@ -122,8 +139,32 @@ def _velas(coin, tf):
     return v
 
 
-def _existente(coin, tf):
-    c = glob.glob(os.path.join(DIR_HISTORICOS, "*_%s_niveles_%s.csv" % (coin.upper(), tf)))
+# mapeo clave de cfg -> flag CLI -> codigo corto para el sufijo del fichero
+OVERRIDES = [
+    ("k", "k", "k"),
+    ("toques_min", "toques_min", "t"),
+    ("tolerancia_atr", "tolerancia_atr", "tol"),
+    ("confirmacion_velas", "confirmacion_velas", "conf"),
+    ("periodo_atr", "periodo_atr", "patr"),
+    ("max_dist_pct", "max_dist_pct", "maxd"),
+    ("max_antig_dias", "max_antig_dias", "maxa"),
+    ("separacion_min_atr", "separacion_min_atr", "sep"),
+]
+
+
+def _sufijo(args):
+    """Sufijo del fichero con los parametros que se pasaron por CLI y difieren
+    del base (produccion/defecto). Vacio si no se paso ninguno."""
+    partes = []
+    for clave_cfg, clave_arg, codigo in OVERRIDES:
+        valor = getattr(args, clave_arg)
+        if valor is not None:
+            partes.append("%s%s" % (codigo, valor))
+    return ("_" + "_".join(partes)) if partes else ""
+
+
+def _existente(coin, tf, sufijo=""):
+    c = glob.glob(os.path.join(DIR_HISTORICOS, "*_%s_niveles_%s%s.csv" % (coin.upper(), tf, sufijo)))
     return max(c, key=os.path.getmtime) if c else None
 
 
@@ -150,21 +191,35 @@ def main():
     p.add_argument("--ventana", type=int, default=4000,
                    help="velas que ve cada recalculo (default 4000)")
     p.add_argument("--desde", default=None, help="YYYY-MM-DD")
+    p.add_argument("--k", type=int, default=None)
+    p.add_argument("--toques_min", type=int, default=None)
+    p.add_argument("--tolerancia_atr", type=float, default=None)
+    p.add_argument("--confirmacion_velas", type=int, default=None)
+    p.add_argument("--periodo_atr", type=int, default=None)
+    p.add_argument("--max_dist_pct", type=float, default=None)
+    p.add_argument("--max_antig_dias", type=float, default=None)
+    p.add_argument("--separacion_min_atr", type=float, default=None)
     a = p.parse_args()
 
     coin, tf = a.coin.upper(), a.tf
     cada = a.cada or VELAS_POR_DIA[tf]
     cfg = _config(coin, tf)
+    for clave_cfg, clave_arg, _codigo in OVERRIDES:
+        valor = getattr(a, clave_arg)
+        if valor is not None:
+            cfg[clave_cfg] = valor
+    sufijo = _sufijo(a)
     v = _velas(coin, tf)
     print("velas %s %s: %d  (%s -> %s)"
           % (coin, tf, len(v),
              time.strftime('%Y-%m-%d', time.gmtime(v[0][0] / 1000)),
              time.strftime('%Y-%m-%d', time.gmtime(v[-1][0] / 1000))))
-    print("config: %s" % {k: cfg[k] for k in ('k', 'tolerancia_atr', 'toques_min',
-                                              'max_dist_pct', 'max_antig_dias')})
+    print("config: %s%s" % ({k: cfg[k] for k in ('k', 'tolerancia_atr', 'toques_min',
+                                                  'max_dist_pct', 'max_antig_dias')},
+                            " (sufijo salida: %s)" % sufijo[1:] if sufijo else ""))
 
     desde_ms = 0
-    previo = _existente(coin, tf)
+    previo = _existente(coin, tf, sufijo)
     if previo:
         ult = _ultimo_calculo(previo)
         if ult:
@@ -179,8 +234,8 @@ def main():
     # toques signifiquen algo; por debajo de 300 velas el resultado es ruido
     ini = max(300, next((i for i, x in enumerate(v) if x[0] >= desde_ms), len(v)))
 
-    nueva = os.path.join(DIR_HISTORICOS, "%s_%s_niveles_%s.csv"
-                         % (datetime.now(timezone.utc).strftime("%d-%m-%y"), coin, tf))
+    nueva = os.path.join(DIR_HISTORICOS, "%s_%s_niveles_%s%s.csv"
+                         % (datetime.now(timezone.utc).strftime("%d-%m-%y"), coin, tf, sufijo))
     if previo and previo != nueva:
         os.replace(previo, nueva)
     modo = 'a' if previo else 'w'
