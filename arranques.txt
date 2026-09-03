@@ -26,15 +26,11 @@ nohup venv/bin/python -u libro/libro.py eth --cada 900 --mercado futuros >/dev/n
 # de 7 dias que sirve Bitget. Si se para, se repone al volver.
 # En arranque en frio conviene una pasada previa sin --loop (mas rapida, sin
 # tope por ciclo) antes de lanzar el bucle:
-#   venv/bin/python -u libro/flujo.py eth --cada 60
+nohup venv/bin/python -u libro/libro.py eth --cada 900 --mercado futuros >/dev/null 2>&1 &
 nohup venv/bin/python -u libro/flujo.py eth --loop --cada 60 --mercado futuros >/dev/null 2>&1 &
 nohup venv/bin/python -u velas/descargar_bit_futuros.py eth --loop >/dev/null 2>&1 &
 nohup venv/bin/python -u velas/descargar_bit_spot.py eth --loop >/dev/null 2>&1 &
 nohup venv/bin/python -u niveles/niveles.py eth --mercado futuros --loop 60 >/dev/null 2>&1 &
-
-# vigilante.py: avisa por Telegram cuando un recolector deja de grabar.
-# El 2026-09-02 las velas llevaban 2 h paradas y nos enteramos por casualidad.
-nohup venv/bin/python -u alertas/vigilante.py --loop 300 >/dev/null 2>&1 &
 
 agente de planificación
 
