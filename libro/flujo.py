@@ -131,6 +131,7 @@ import platform
 import sys
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone, timedelta
 
 import ccxt
@@ -165,7 +166,7 @@ CAMPOS_FLUJO = [
 ]
 
 CAMPOS_TRADES = [
-    "timestamp_exchange_ms", "ventana_fin_ms", "fecha_utc",
+    "id", "timestamp_exchange_ms", "ventana_fin_ms", "fecha_utc",
     "precio", "volumen", "lado", "coin",
 ]
 
@@ -269,7 +270,7 @@ def _ex_funding_historico(simbolo, desde_ms):
 # ---------------------------------------------------------------
 
 def _paseo_atras(simbolo, desde_ms, hasta_ms, logger, etiqueta=""):
-    """Recorre [desde_ms, hasta_ms] hacia atras y devuelve los trades unicos.
+    """Recorre [desde_ms, hasta_ms) hacia atras y devuelve los trades unicos.
 
     Cada lote empieza donde acabo el anterior por abajo, asi que no hay huecos.
     La deduplicacion por id hace falta porque los bordes se solapan: un trade
@@ -332,7 +333,17 @@ def _paseo_atras(simbolo, desde_ms, hasta_ms, logger, etiqueta=""):
             % (etiqueta, MAX_PAGINAS_TRAMO, _fmt(desde_ms), _fmt(fin))
         )
 
-    dentro = [t for t in vistos.values() if desde_ms <= t['timestamp'] <= hasta_ms]
+    # Semiabierto [desde_ms, hasta_ms), para que coincida con la convencion de
+    # _agregar (fin = ((ts // ventana_ms) + 1) * ventana_ms mete un ts que cae
+    # EXACTAMENTE en un multiplo de ventana_ms en la ventana SIGUIENTE, no en
+    # la que termina ahi mismo). Con cierre inclusivo en hasta_ms (probado y
+    # revertido) ese trade se pedia aqui, _agregar lo colocaba en la ventana de
+    # despues, ese ciclo la descartaba por no haber cerrado aun (ver el filtro
+    # de _capturar), y el ciclo SIGUIENTE ya no lo volvia a pedir porque su
+    # propio desde_ms excluia justo ese valor: se perdia para siempre y sin que
+    # _huecos() lo notase, porque la ventana en si SI se escribia -- solo que
+    # de menos. Verificado con una simulacion antes de tocarlo otra vez.
+    dentro = [t for t in vistos.values() if desde_ms <= t['timestamp'] < hasta_ms]
     dentro.sort(key=lambda t: (t['timestamp'], str(t.get('id'))))
     return dentro, paginas
 
@@ -490,15 +501,80 @@ def _fusionar_flujo(salida, coin, mercado, nuevas, sobrescribir, logger):
     return escritas
 
 
+# Cuantos ficheros trades_*.csv distintos se mantienen en cache de claves ya
+# escritas. Cada uno puede acumular cientos de miles de tuplas (un dia
+# completo a maxima actividad); limitar el numero de ficheros evita que un
+# proceso --loop de semanas acumule en memoria dias ya cerrados y olvidados.
+_CACHE_CLAVES_MAX_FICHEROS = 4
+_claves_por_ruta = OrderedDict()  # ruta -> set de claves ya escritas en ese CSV
+
+
+def _clave_trade(id_, ts, precio, volumen, lado):
+    """El id real del trade es la unica clave que no puede coincidir entre
+    dos trades DISTINTOS -- se prefiere siempre que el exchange lo de. Si
+    falta (None o vacio), se cae a (timestamp, precio, volumen, lado), que en
+    una rafaga que comparte milisegundo, precio Y tamano si puede colisionar
+    entre dos trades reales distintos (ver _paseo_atras: 'rafaga de >1000
+    trades en el mismo ms'). El prefijo separa los dos espacios de claves para
+    que un id que por casualidad coincida con un valor de la tupla no se
+    confunda con ella."""
+    if id_:
+        return ("id", str(id_))
+    return ("tpl", int(ts), float(precio), float(volumen), lado)
+
+
+def _claves_existentes(ruta):
+    """Claves (ver _clave_trade) ya presentes en un CSV de trades. Se lee una
+    vez por fichero y proceso; de ahi en adelante vive en memoria via
+    _claves_cache. Los ficheros escritos antes de que 'id' fuera una columna
+    no la tienen: r.get('id') da None y cae sola al fallback por tupla."""
+    claves = set()
+    if os.path.exists(ruta):
+        with open(ruta, newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                try:
+                    claves.add(_clave_trade(r.get("id"), r["timestamp_exchange_ms"],
+                                             r["precio"], r["volumen"], r["lado"]))
+                except (KeyError, ValueError):
+                    continue
+    return claves
+
+
+def _claves_cache(ruta):
+    if ruta in _claves_por_ruta:
+        _claves_por_ruta.move_to_end(ruta)
+        return _claves_por_ruta[ruta]
+    claves = _claves_existentes(ruta)
+    _claves_por_ruta[ruta] = claves
+    if len(_claves_por_ruta) > _CACHE_CLAVES_MAX_FICHEROS:
+        _claves_por_ruta.popitem(last=False)
+    return claves
+
+
 def _anexar_trades(salida, coin, mercado, trades, ventana_ms):
     """Anexa el detalle. No reescribe: son cientos de miles de filas por dia.
     Tras reparar un hueco antiguo el fichero queda desordenado; quien lo
-    necesite en orden que ordene por timestamp_exchange_ms al leer."""
+    necesite en orden que ordene por timestamp_exchange_ms al leer.
+
+    Deduplica por id real del trade (ver _clave_trade) antes de escribir: el
+    WS en vivo y la reparacion REST pueden procesar la misma ventana mas de
+    una vez (auditoria que corre justo antes de que el WS vuelque, un
+    reinicio del proceso, o la visibilidad de escrituras via SMB -- ver
+    _tomar_lock), y _paseo_atras solo deduplica DENTRO de una misma llamada,
+    no entre llamadas distintas.
+
+    NOTA: un trades_*.csv de HOY ya abierto antes de este cambio no tiene la
+    columna 'id' en su cabecera; las filas que se le anexen ahora si la
+    llevaran, con lo que ese fichero concreto queda con mas columnas en las
+    filas nuevas que en la cabecera vieja. Nada mas en el proyecto lo lee
+    todavia, asi que no rompe nada -- pero si te importa la consistencia,
+    rota (renombra) el CSV de hoy a mano y deja que se cree uno nuevo."""
     por_dia = {}
     for t in trades:
         fin = ((t['timestamp'] // ventana_ms) + 1) * ventana_ms
         ruta = _ruta(salida, "trades", coin, mercado, t['timestamp'])
         por_dia.setdefault(ruta, []).append({
+            "id": t.get("id") or "",
             "timestamp_exchange_ms": t['timestamp'],
             "ventana_fin_ms": fin,
             "fecha_utc": _fmt(t['timestamp'], segundos=True),
@@ -511,11 +587,25 @@ def _anexar_trades(salida, coin, mercado, trades, ventana_ms):
     with _LOCK_ESCRITURA:
       for ruta, filas in por_dia.items():
         nuevo = not os.path.exists(ruta)
+        vistas = _claves_cache(ruta)
+
+        a_escribir = []
+        for fila in filas:
+            clave = _clave_trade(fila["id"], fila["timestamp_exchange_ms"],
+                                  fila["precio"], fila["volumen"], fila["lado"])
+            if clave in vistas:
+                continue
+            vistas.add(clave)
+            a_escribir.append(fila)
+
+        if not a_escribir:
+            continue
+
         with open(ruta, "a", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=CAMPOS_TRADES)
             if nuevo:
                 w.writeheader()
-            w.writerows(filas)
+            w.writerows(a_escribir)
 
 
 # ---------------------------------------------------------------
@@ -532,7 +622,9 @@ def _capturar(simbolo, coin, mercado, desde_ms, hasta_ms, ventana_ms,
     filas = _agregar(trades, ventana_ms, coin)
     # La primera y la ultima ventana del tramo pueden estar cortadas por los
     # bordes del propio tramo. Solo se escriben las que caen enteras dentro.
-    filas = {k: v for k, v in filas.items() if desde_ms < k <= hasta_ms + ventana_ms}
+    # (el "+ ventana_ms" que hubo aqui colaba una ventana extra que el tramo
+    # siguiente -- o el ciclo en vivo siguiente -- volvia a escribir igual)
+    filas = {k: v for k, v in filas.items() if desde_ms < k <= hasta_ms}
 
     escritas = _fusionar_flujo(salida, coin, mercado, filas, sobrescribir, logger)
     _anexar_trades(salida, coin, mercado, trades, ventana_ms)

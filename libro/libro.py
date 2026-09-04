@@ -432,8 +432,16 @@ def _ruta_lock(coins, mercado):
     """Fichero de lock dedicado, aparte del CSV de datos: asi la marca de
     texto (host|pid|timestamp) no se mezcla con las filas, y el lock
     sobrevive a la rotacion diaria del CSV sin tener que soltarse y
-    retomarse en cada cambio de dia."""
-    return os.path.join(DIR_DATOS, ".libro_{}_{}.lock".format("-".join(coins), mercado))
+    retomarse en cada cambio de dia.
+
+    Se nombra igual que _archivo(): SOLO coins[0], no toda la lista. El CSV
+    real es uno solo por coins[0]+mercado (todas las monedas de 'coins'
+    caen ahi dentro, ver el bucle principal de main()); si el lock llevara
+    la lista entera, 'eth' y 'eth,btc' apuntarian al mismo CSV pero a locks
+    distintos y ninguno veria al otro -- justo lo que este lock existe para
+    evitar.
+    """
+    return os.path.join(DIR_DATOS, ".libro_{}_{}.lock".format(coins[0].upper(), mercado))
 
 
 def _tomar_lock(ruta, vigencia_s, logger):
