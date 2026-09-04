@@ -420,8 +420,55 @@ def _ls_ratio(coin, simbolo, cache, ls_ratio_cada, logger):
     return valor
 
 
-def _aplicar_lock(arch, logger):
-    """Aplica file lock multiplataforma (Windows/Linux) para evitar race conditions."""
+# Cuanto vale una marca de lock antes de considerarla de un proceso muerto.
+# Debe superar de sobra el peor ciclo (cada, que es un parametro del usuario):
+# si la vigencia fuese mas corta que la cadencia real, un proceso vivo pero
+# que solo refresca una vez por ciclo perderia su propio lock entre refrescos.
+LOCK_VIGENCIA_FACTOR = 3.0
+LOCK_VIGENCIA_MINIMA_S = 300.0
+
+
+def _ruta_lock(coins, mercado):
+    """Fichero de lock dedicado, aparte del CSV de datos: asi la marca de
+    texto (host|pid|timestamp) no se mezcla con las filas, y el lock
+    sobrevive a la rotacion diaria del CSV sin tener que soltarse y
+    retomarse en cada cambio de dia."""
+    return os.path.join(DIR_DATOS, ".libro_{}_{}.lock".format("-".join(coins), mercado))
+
+
+def _tomar_lock(ruta, vigencia_s, logger):
+    """Impide dos instancias escribiendo sobre la misma salida.
+
+    Dos mecanismos, porque uno solo no basta -- el mismo problema que ya
+    resolvio flujo.py el 2026-09-02 (ver su _tomar_lock), nunca aplicado
+    aqui hasta ahora:
+
+    1. Lock del SO (fcntl / msvcrt). Fiable ENTRE PROCESOS DE LA MISMA
+       PLATAFORMA, pero NO entre ellas: este proyecto se toca desde Windows
+       (msvcrt) y corre en un NAS Linux (fcntl) por SMB. Un proceso Windows
+       puede arrancar encima del de Linux sin que ninguno vea el lock del
+       otro -- comprobado en vivo el 2026-09-02 con flujo.py, y reproducido
+       por accidente con este mismo libro.py durante una auditoria.
+
+    2. Marca host|pid|timestamp dentro del propio fichero de lock, que el
+       proceso vivo refresca cada ciclo (ver _refrescar_lock). Si la marca es
+       reciente hay otro corriendo, venga de la plataforma que venga: es lo
+       unico que cruza SMB.
+    """
+    try:
+        with open(ruta, "r", encoding="utf-8") as f:
+            partes = f.read().strip().split("|")
+        if len(partes) == 3 and (time.time() - float(partes[2])) < vigencia_s:
+            logger.error(
+                f"Ya hay otra instancia en ejecucion sobre {ruta} "
+                f"(host={partes[0]} pid={partes[1]}, marca de hace "
+                f"{time.time() - float(partes[2]):.0f}s). Saliendo."
+            )
+            sys.exit(1)
+    except (IOError, OSError, ValueError, IndexError):
+        pass  # sin fichero, ilegible o formato viejo: se toma igualmente
+
+    arch = open(ruta, "w+", encoding="utf-8")
     try:
         if platform.system() == "Windows":
             msvcrt.locking(arch.fileno(), msvcrt.LK_NBLCK, 1)
@@ -431,10 +478,24 @@ def _aplicar_lock(arch, logger):
         logger.error("Otra instancia en ejecución. Saliendo.")
         arch.close()
         sys.exit(1)
+    _refrescar_lock(arch)
+    return arch
 
 
-def _liberar_lock(arch):
-    """Libera file lock multiplataforma."""
+def _refrescar_lock(arch):
+    """Renueva la marca. Si se deja de llamar, a los `vigencia_s` de
+    _tomar_lock el lock se considera huerfano y otro proceso puede tomarlo."""
+    try:
+        arch.seek(0)
+        arch.truncate()
+        arch.write(f"{platform.node()}|{os.getpid()}|{time.time():.0f}")
+        arch.flush()
+    except (IOError, OSError):
+        pass
+
+
+def _soltar_lock(arch):
+    """Libera el lock del SO y cierra el fichero de marca."""
     try:
         if platform.system() == "Windows":
             msvcrt.locking(arch.fileno(), msvcrt.LK_UNLCK, 1)
@@ -442,6 +503,7 @@ def _liberar_lock(arch):
             fcntl.flock(arch.fileno(), fcntl.LOCK_UN)
     except (IOError, OSError):
         pass
+    arch.close()
 
 
 def _fila(coin, simbolo, profundidad, funding_cache, funding_cada,
@@ -516,10 +578,37 @@ def _fila(coin, simbolo, profundidad, funding_cache, funding_cada,
     }
 
 
-def main():
-    _crear_estructura()
+def _ayuda():
+    print("Uso:")
+    print("  python libro/libro.py [monedas] [opciones]")
+    print("  Monedas: btc,eth,sol (default: btc,eth)")
+    print("\nOpciones:")
+    print("  --cada N           segundos entre capturas (default: 900)")
+    print("  --profundidad N    niveles del libro (default: 100; validos: "
+          + ", ".join(str(p) for p in PROFUNDIDADES_VALIDAS) + ")")
+    print("  --funding-cada N   segundos entre updates de funding (default: 300)")
+    print("  --ls-ratio-cada N  segundos entre updates de long/short ratio (default: 300)")
+    print("  --mercado NOMBRE   spot|futuros (default: futuros)")
+    print("\nEjemplos:")
+    print("  python libro/libro.py")
+    print("  python libro/libro.py btc,eth --cada 900")
+    print("  python libro/libro.py btc,eth,icp --profundidad 50 --cada 300")
+    print(f"\nSalida: {DIR_DATOS}/libro_<coin>_<mercado>_YYYYMMDD.csv (rota a medianoche UTC)")
+    print("Parada segura: Ctrl-C, o 'kill -INT <PID>' (no pkill -f, que mataria todas las instancias)")
 
+
+def main():
     args = sys.argv[1:]
+
+    # Se mira ANTES de tocar disco o el exchange: un '--help' colado entre
+    # otros argumentos no debe arrancar la captura en vivo por error (ver
+    # _tomar_lock / validacion de argumentos mas abajo para el resto de
+    # typos).
+    if any(a in ("-h", "--help") for a in args):
+        _ayuda()
+        return
+
+    _crear_estructura()
     coins = []
     mercado = "futuros"
 
@@ -530,32 +619,53 @@ def main():
     if not coins:
         coins = ["BTC", "ETH"]
 
-    # Moneda es singular, pero agrupa todas las monedas en un fichero por ahora
-    # Si hay varias, el primero es el nombre (compatible hacia atrás)
-    logger = _configurar_logging(coins, mercado)
-
     cada = 900.0
     profundidad = 100
     funding_cada = 300.0
     ls_ratio_cada = 300.0
+
+    # Lo que no se reconoce ES UN ERROR, no se ignora en silencio: un typo (o
+    # un '--help' sin soporte dedicado) arrancaba igualmente la captura en
+    # vivo con los valores por defecto sin que nadie se enterase -- pasó de
+    # verdad durante una auditoría. Mismo criterio que parsear_args en
+    # velas_bit.py, aplicado aquí por primera vez.
+    FLAGS_CON_VALOR = ("--cada", "--profundidad", "--funding-cada",
+                       "--ls-ratio-cada", "--mercado")
     i = 0
     while i < len(args):
-        if args[i] == "--cada":
-            i += 1
-            cada = float(args[i])
-        elif args[i] == "--profundidad":
-            i += 1
-            profundidad = int(args[i])
-        elif args[i] == "--funding-cada":
-            i += 1
-            funding_cada = float(args[i])
-        elif args[i] == "--ls-ratio-cada":
-            i += 1
-            ls_ratio_cada = float(args[i])
-        elif args[i] == "--mercado":
-            i += 1
-            mercado = args[i]
-        i += 1
+        arg = args[i]
+        if arg not in FLAGS_CON_VALOR:
+            print(f"[ERROR] argumento no reconocido: {arg}")
+            print(f"        opciones validas: {', '.join(FLAGS_CON_VALOR)}")
+            sys.exit(1)
+        if i + 1 >= len(args):
+            print(f"[ERROR] {arg} requiere un valor")
+            sys.exit(1)
+        valor = args[i + 1]
+        try:
+            if arg == "--cada":
+                cada = float(valor)
+            elif arg == "--profundidad":
+                profundidad = int(valor)
+            elif arg == "--funding-cada":
+                funding_cada = float(valor)
+            elif arg == "--ls-ratio-cada":
+                ls_ratio_cada = float(valor)
+            elif arg == "--mercado":
+                mercado = valor
+        except ValueError:
+            print(f"[ERROR] valor invalido para {arg}: {valor!r}")
+            sys.exit(1)
+        i += 2
+
+    # Moneda es singular, pero agrupa todas las monedas en un fichero por ahora
+    # Si hay varias, el primero es el nombre (compatible hacia atrás).
+    # Se crea DESPUES de leer --mercado: antes se creaba con el default
+    # "futuros" fijo, así que "--mercado spot" grababa datos de spot en un
+    # log que decía "futuros" en el nombre -- exactamente la clase de
+    # fichero-que-miente-sobre-su-contenido que este proyecto ya evita en
+    # otros sitios (ver _ex_simbolo).
+    logger = _configurar_logging(coins, mercado)
 
     if profundidad not in PROFUNDIDADES_VALIDAS:
         logger.warning(
@@ -574,13 +684,15 @@ def main():
     session_id = int(datetime.now(timezone.utc).timestamp() * 1000)
     gap_maximo_s = cada * MAX_GAP_FACTOR
 
+    vigencia_lock_s = max(LOCK_VIGENCIA_MINIMA_S, cada * LOCK_VIGENCIA_FACTOR)
+    lock = _tomar_lock(_ruta_lock(coins, mercado), vigencia_lock_s, logger)
+
     # Fichero de snapshots - se rota en bucle si cambia la fecha UTC
     ruta_snapshot = _archivo(coins, mercado)
     ruta_snapshot = _ruta_compatible(ruta_snapshot, CAMPOS_CSV, logger)
 
     nuevo_snapshot = not os.path.exists(ruta_snapshot)
     arch_snapshot = open(ruta_snapshot, "a", newline="")
-    _aplicar_lock(arch_snapshot, logger)
     writer_snapshot = csv.DictWriter(arch_snapshot, fieldnames=CAMPOS_CSV)
 
     if nuevo_snapshot:
@@ -603,10 +715,10 @@ def main():
             ahora_utc = datetime.now(timezone.utc)
             fecha_hoy = ahora_utc.strftime("%Y%m%d")
 
-            # Rotar ficheros si cambio la fecha UTC
+            # Rotar ficheros si cambio la fecha UTC. El lock vive aparte del
+            # CSV (ver _ruta_lock) y no necesita soltarse ni retomarse aqui.
             if fecha_previo is not None and fecha_hoy != fecha_previo:
                 logger.info(f"ROTACION: Cambio de dia UTC ({fecha_previo} -> {fecha_hoy})")
-                _liberar_lock(arch_snapshot)
                 arch_snapshot.close()
 
                 ruta_snapshot = _archivo(coins, mercado)
@@ -614,7 +726,6 @@ def main():
 
                 nuevo_snapshot = not os.path.exists(ruta_snapshot)
                 arch_snapshot = open(ruta_snapshot, "a", newline="")
-                _aplicar_lock(arch_snapshot, logger)
                 writer_snapshot = csv.DictWriter(arch_snapshot, fieldnames=CAMPOS_CSV)
 
                 if nuevo_snapshot:
@@ -640,11 +751,12 @@ def main():
                 writer_snapshot.writerow(fila)
                 arch_snapshot.flush()
 
+            _refrescar_lock(lock)
             time.sleep(cada)
     except KeyboardInterrupt:
         logger.info("Parado por el usuario.")
     finally:
-        _liberar_lock(arch_snapshot)
+        _soltar_lock(lock)
         arch_snapshot.close()
 
 

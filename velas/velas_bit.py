@@ -1098,12 +1098,21 @@ def parsear_args(argv, banderas=()):
     Se filtra por '-' y no por '--' porque con un solo guion era peor todavia:
     '-rehacer' no entraba por la rama de banderas y se tomaba como el nombre
     de la moneda.
+
+    '-h'/'--help' se reconocen siempre, sin declararlos en 'banderas': antes
+    caian por la rama de "argumentos no reconocidos" y el frontal terminaba
+    con un [ERROR] en vez de con la ayuda. Quien llama debe mirar
+    opciones['--help'] ANTES de exigir 'coin'.
     """
     coin = None
     tfs = None
     opciones = {b: False for b in banderas}
+    opciones.setdefault('--help', False)
     sobrantes = []
     for arg in argv:
+        if arg in ('-h', '--help'):
+            opciones['--help'] = True
+            continue
         if arg.startswith('-'):
             if arg in opciones:
                 opciones[arg] = True

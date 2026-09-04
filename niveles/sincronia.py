@@ -167,9 +167,9 @@ def informe(coin, tfs, mercado):
 
 def main():
     args = sys.argv[1:]
-    if not args:
+    if not args or args[0] in ("-h", "--help"):
         print(__doc__ or "Uso: python sincronia.py <coin> [TF,TF,...] [--mercado spot|futuros]")
-        return 1
+        return 0 if args else 1
 
     coin = args[0]
     resto = args[1:]

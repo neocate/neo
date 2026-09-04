@@ -148,7 +148,7 @@ def main(mercado, argv=None, script='descargar_hist_bit.py'):
         print(f"[ERROR] {e}")
         sys.exit(1)
 
-    if not coin:
+    if opciones['--help'] or not coin:
         _ayuda(mercado, script)
         return
 
