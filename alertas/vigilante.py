@@ -185,10 +185,17 @@ def revisar(coin, mercado):
         if ts is None:
             ok, det = False, "no se pudo leer la ultima vela"
         elif SINCRONIA:
+            # sincronia.es_reciente maneja correctamente el desfase de confirmacion
+            # de velas (abre a T, se guarda cerrada en T+2*TF): usa TF + max(2*TF, 300s)
             ok = sincronia.es_reciente(ts, tf)
             det = "ultima vela hace %s (criterio sincronia)" % _dur(e)
         else:
-            lim = seg * FACTOR_MARGEN
+            # Fallback: criterio simple. Para velas cortas (1m, 3m, 5m) se estricto
+            # porque el desfase de confirmacion les pesa mas
+            if seg <= 300:
+                lim = seg * 2
+            else:
+                lim = seg * FACTOR_MARGEN
             ok = e <= lim
             det = "ultima vela hace %s (limite %s)" % (_dur(e), _dur(lim))
         r.append(("velas %s" % tf, ok, det))
