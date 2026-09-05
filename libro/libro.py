@@ -715,7 +715,7 @@ def main():
 
     funding_cache = {}
     ls_ratio_cache = {}
-    timestamp_previo = None
+    timestamp_previo_por_coin = {}
     fecha_previo = None
 
     try:
@@ -747,14 +747,13 @@ def main():
                 fila = _fila(coin, simbolos[coin], profundidad, funding_cache, funding_cada,
                              ls_ratio_cache, ls_ratio_cada, session_id, logger)
 
-                # Validar gap temporal
                 ts_actual = fila["timestamp_local_ms"]
-                if timestamp_previo is not None:
-                    gap_ms = ts_actual - timestamp_previo
+                if coin in timestamp_previo_por_coin:
+                    gap_ms = ts_actual - timestamp_previo_por_coin[coin]
                     gap_s = gap_ms / 1000.0
                     if gap_s > gap_maximo_s:
-                        logger.error(f"GAP DETECTADO: {gap_s:.1f}s entre registros (esperado: {cada:.0f}s) - posible downtime")
-                timestamp_previo = ts_actual
+                        logger.error(f"GAP DETECTADO {coin}: {gap_s:.1f}s entre registros (esperado: {cada:.0f}s) - posible downtime")
+                timestamp_previo_por_coin[coin] = ts_actual
 
                 writer_snapshot.writerow(fila)
                 arch_snapshot.flush()

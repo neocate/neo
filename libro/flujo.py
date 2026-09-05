@@ -362,6 +362,7 @@ def _agregar(trades, ventana_ms, coin):
 
     filas = {}
     for fin, lote in cubos.items():
+        lote_ordenado = sorted(lote, key=lambda t: t['timestamp'])
         vb = sum(t['amount'] for t in lote if t['side'] == 'buy')
         vs = sum(t['amount'] for t in lote if t['side'] == 'sell')
         marcas = [t['timestamp'] for t in lote]
@@ -381,8 +382,8 @@ def _agregar(trades, ventana_ms, coin):
             "ts_primer_trade": min(marcas),
             "ts_ultimo_trade": max(marcas),
             "cobertura_pct": round(100.0 * (max(marcas) - min(marcas)) / ventana_ms, 2),
-            "precio_apertura": lote[0]['price'],
-            "precio_cierre": lote[-1]['price'],
+            "precio_apertura": lote_ordenado[0]['price'],
+            "precio_cierre": lote_ordenado[-1]['price'],
             "precio_max": max(precios),
             "precio_min": min(precios),
             "vwap": round(vwap, 4),

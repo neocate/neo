@@ -173,7 +173,10 @@ def revisar(coin, mercado):
     # --- velas: una por periodo de cada TF ---
     for p in sorted(glob.glob(os.path.join(DIR_NEO, "velas", coin,
                                            "bitget_%s_*_%s.csv" % (coin, mercado)))):
-        tf = os.path.basename(p)[:-4].split('_')[2]
+        partes = os.path.basename(p)[:-4].split('_')
+        if len(partes) < 3:
+            continue
+        tf = partes[2]
         seg = TF_SEGUNDOS.get(tf)
         if seg is None:
             continue

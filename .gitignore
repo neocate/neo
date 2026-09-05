@@ -37,3 +37,6 @@ niveles/logs/*
 env.txt
 *.env.txt
 env_*.txt
+
+# Privado
+privado/

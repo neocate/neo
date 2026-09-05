@@ -86,6 +86,8 @@ def _ultimo_timestamp_ms(ruta):
         f.seek(max(0, tam - 65536))
         cola = f.read()
     lineas = [l for l in cola.split(b'\n') if l.strip()]
+    if not lineas:
+        raise ValueError(f"Archivo {ruta} vacio o solo encabezados")
     return int(lineas[-1].split(b',')[0])
 
 

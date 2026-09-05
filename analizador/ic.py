@@ -101,8 +101,8 @@ def variables(d):
     v["dvol_z"] = (vol - vol.rolling(60).mean()) / vol.rolling(60).std()
     v["ntrades"] = d["n_trades"]
     v["tam_medio"] = vol / d["n_trades"].replace(0, np.nan)
-    v["rango"] = (d["precio_max"] - d["precio_min"]) / d["precio_cierre"] * 100
-    v["desv_vwap"] = (d["precio_cierre"] - d["vwap"]) / d["vwap"] * 100
+    v["rango"] = (d["precio_max"] - d["precio_min"]) / d["precio_cierre"].replace(0, np.nan) * 100
+    v["desv_vwap"] = (d["precio_cierre"] - d["vwap"]) / d["vwap"].replace(0, np.nan) * 100
     v["ret_prev"] = d["precio_cierre"].pct_change() * 100
     v["cvd_pend"] = d["cvd"].diff(15)
     return v

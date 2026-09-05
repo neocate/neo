@@ -40,6 +40,8 @@ def _ruta_csv(coin, tf, mercado):
 
 
 def _fila_vela(row):
+    if len(row) < 7:
+        raise ValueError(f"fila con {len(row)} columnas, esperadas 7")
     ts = int(row[0])
     apertura, alto, bajo, cierre = float(row[2]), float(row[3]), float(row[4]), float(row[5])
     volumen = float(row[6])
