@@ -7,6 +7,7 @@ from logging.handlers import RotatingFileHandler
 import os
 import sys
 import time
+import uuid
 from datetime import datetime, timezone, timedelta
 import platform
 
@@ -32,6 +33,7 @@ CAMPOS_CSV = [
     "imbalance", "imbalance_niveles", "imbalance_amplio",
     "last_price", "mark_price", "index_price",
     "open_interest", "funding_rate_pct", "long_short_ratio", "session_id",
+    "profundidad_real", "profundidad_real_amplio",
     "bids_json", "asks_json",
     "bids_amplio_json", "asks_amplio_json",
 ]
@@ -40,7 +42,9 @@ MAX_GAP_FACTOR = 1.1
 
 PROFUNDIDADES_VALIDAS = (1, 5, 15, 50, 100)
 
-PRECISION_AMPLIA = 'scale2' 
+PRECISION_AMPLIA = 'scale2'
+
+PROFUNDIDAD_MINIMA_ACEPTADA = 50 
 
 
 _cliente = None
@@ -126,6 +130,15 @@ def _volumen(niveles, n):
         except (IndexError, TypeError, ValueError):
             continue
     return total
+
+
+def _profundidad_real(libro):
+    """Retorna la profundidad real devuelta por el exchange"""
+    if not isinstance(libro, dict):
+        return 0
+    bids = libro.get('bids', [])
+    asks = libro.get('asks', [])
+    return min(len(bids), len(asks))
 
 
 def _imbalance(libro, niveles=10):
@@ -309,7 +322,7 @@ def _fila(coin, simbolo, profundidad, funding_cache, funding_cada,
           ls_ratio_cache, ls_ratio_cada, session_id, logger):
     ahora = datetime.now(timezone.utc)
     timestamp_local_ms = int(ahora.timestamp() * 1000)
-    estado = "ok"
+    errores = []
     timestamp_exchange_ms = None
 
     try:
@@ -317,55 +330,83 @@ def _fila(coin, simbolo, profundidad, funding_cache, funding_cada,
     except Exception as e:
         logger.warning(f"libro {coin}: {e}")
         libro = None
-        estado = "error_libro"
+        errores.append("libro")
 
     try:
         libro_amplio = _ex_libro(simbolo, depth=profundidad, precision=PRECISION_AMPLIA)
     except Exception as e:
         logger.warning(f"libro amplio {coin}: {e}")
         libro_amplio = None
+        errores.append("libro_amplio")
 
     try:
         precios = _ex_ticker(simbolo)
     except Exception as e:
         logger.warning(f"ticker {coin}: {e}")
         precios = {}
+        errores.append("ticker")
+    else:
+        if precios.get("last") is None:
+            logger.warning(f"ticker {coin}: respuesta sin last/mark/index")
+            errores.append("ticker")
 
     try:
         oi = _ex_open_interest(simbolo)
     except Exception as e:
         logger.warning(f"open_interest {coin}: {e}")
         oi = None
+        errores.append("oi")
 
-    funding = _funding_pct(coin, simbolo, funding_cache, funding_cada, logger)
-    ls_ratio = _ls_ratio(coin, simbolo, ls_ratio_cache, ls_ratio_cada, logger)
+    try:
+        funding = _funding_pct(coin, simbolo, funding_cache, funding_cada, logger)
+    except Exception as e:
+        logger.warning(f"funding {coin}: {e}")
+        funding = None
+        errores.append("funding")
+
+    try:
+        ls_ratio = _ls_ratio(coin, simbolo, ls_ratio_cache, ls_ratio_cada, logger)
+    except Exception as e:
+        logger.warning(f"ls_ratio {coin}: {e}")
+        ls_ratio = None
+        errores.append("ls_ratio")
+
+    estado = ",".join(errores) if errores else "ok"
 
     bids = None
     asks = None
+    prof_real = 0
     if libro:
         bids = libro.get("bids")
         asks = libro.get("asks")
         timestamp_exchange_ms = libro.get("timestamp")
+        prof_real = _profundidad_real(libro)
 
     bids_amplio = libro_amplio.get("bids") if libro_amplio else None
     asks_amplio = libro_amplio.get("asks") if libro_amplio else None
+    prof_real_amplio = _profundidad_real(libro_amplio) if libro_amplio else 0
+
+    if prof_real < PROFUNDIDAD_MINIMA_ACEPTADA and prof_real > 0:
+        logger.warning(f"{coin}: profundidad real {prof_real} < minima esperada {PROFUNDIDAD_MINIMA_ACEPTADA}")
 
     return {
         "timestamp_local_ms": timestamp_local_ms,
         "fecha_utc": ahora.strftime("%Y-%m-%d %H:%M:%S"),
-        "timestamp_exchange_ms": timestamp_exchange_ms if timestamp_exchange_ms is not None else "",
+        "timestamp_exchange_ms": timestamp_exchange_ms or "",
         "estado": estado,
         "coin": coin,
         "imbalance": _imbalance(libro, niveles=profundidad) if libro else "",
         "imbalance_niveles": profundidad,
         "imbalance_amplio": _imbalance(libro_amplio, niveles=profundidad) if libro_amplio else "",
-        "last_price": precios.get("last") if precios.get("last") is not None else "",
-        "mark_price": precios.get("mark") if precios.get("mark") is not None else "",
-        "index_price": precios.get("index") if precios.get("index") is not None else "",
-        "open_interest": oi if oi is not None else "",
-        "funding_rate_pct": funding if funding is not None else "",
-        "long_short_ratio": ls_ratio if ls_ratio is not None else "",
+        "last_price": precios.get("last") or "",
+        "mark_price": precios.get("mark") or "",
+        "index_price": precios.get("index") or "",
+        "open_interest": oi or "",
+        "funding_rate_pct": funding or "",
+        "long_short_ratio": ls_ratio or "",
         "session_id": session_id,
+        "profundidad_real": prof_real,
+        "profundidad_real_amplio": prof_real_amplio,
         "bids_json": json.dumps(bids) if bids else "",
         "asks_json": json.dumps(asks) if asks else "",
         "bids_amplio_json": json.dumps(bids_amplio) if bids_amplio else "",
@@ -460,7 +501,7 @@ def main():
         )
 
     simbolos = {c: _ex_simbolo(c, mercado) for c in coins}
-    session_id = int(datetime.now(timezone.utc).timestamp() * 1000)
+    session_id = str(uuid.uuid4())
     gap_maximo_s = cada * MAX_GAP_FACTOR
 
     vigencia_lock_s = max(LOCK_VIGENCIA_MINIMA_S, cada * LOCK_VIGENCIA_FACTOR)

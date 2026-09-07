@@ -34,7 +34,7 @@ CAMPOS_FLUJO = [
     "ventana_fin_ms", "fecha_utc", "coin",
     "n_trades", "vol_buy", "vol_sell", "delta_vol", "cvd",
     "ts_primer_trade", "ts_ultimo_trade", "cobertura_pct",
-    "precio_apertura", "precio_cierre", "precio_max", "precio_min", "vwap",
+    "precio_apertura", "precio_cierre", "precio_max", "precio_min", "vwap", "vwap_diario",
 ]
 
 CAMPOS_TRADES = [
@@ -151,20 +151,52 @@ def _paseo_atras(simbolo, desde_ms, hasta_ms, logger, etiqueta=""):
     return dentro, paginas
 
 
-def _agregar(trades, ventana_ms, coin):
-    cubos = {}
+def _dedup_trades_captura(trades):
+    vistos = {}
+    dedup = []
     for t in trades:
-        fin = ((t['timestamp'] // ventana_ms) + 1) * ventana_ms
-        cubos.setdefault(fin, []).append(t)
+        clave = _clave_trade(t.get("id"), t.get("timestamp"), t.get("price"), t.get("amount"), t.get("side"))
+        if clave not in vistos:
+            vistos[clave] = True
+            dedup.append(t)
+    return dedup
+
+
+def _agregar(trades, ventana_ms, coin, logger=None):
+    cubos = {}
+    invalidos = 0
+
+    for t in trades:
+        try:
+            amount = float(t.get('amount', 0))
+            price = float(t.get('price', 0))
+            side = t.get('side', '')
+            timestamp = int(t.get('timestamp', 0))
+
+            if amount <= 0 or price <= 0 or side not in ('buy', 'sell') or timestamp <= 0:
+                invalidos += 1
+                continue
+
+            fin = ((timestamp // ventana_ms) + 1) * ventana_ms
+            cubos.setdefault(fin, []).append(t)
+        except (TypeError, ValueError):
+            invalidos += 1
+            continue
+
+    if invalidos and logger:
+        logger.warning("%s trades invalidos descartados: amount<=0, price<=0, side invalido o timestamp<=0" % invalidos)
 
     filas = {}
     for fin, lote in cubos.items():
-        vb = sum(t['amount'] for t in lote if t['side'] == 'buy')
-        vs = sum(t['amount'] for t in lote if t['side'] == 'sell')
-        marcas = [t['timestamp'] for t in lote]
-        precios = [t['price'] for t in lote]
+        if not lote:
+            continue
+
+        vb = sum(float(t['amount']) for t in lote if t['side'] == 'buy')
+        vs = sum(float(t['amount']) for t in lote if t['side'] == 'sell')
+        marcas = [int(t['timestamp']) for t in lote]
+        precios = [float(t['price']) for t in lote]
         volumen = vb + vs
-        vwap = (sum(t['price'] * t['amount'] for t in lote) / volumen) if volumen > 0 else 0.0
+        vwap = (sum(float(t['price']) * float(t['amount']) for t in lote) / volumen) if volumen > 0 else 0.0
 
         filas[fin] = {
             "ventana_fin_ms": fin,
@@ -178,11 +210,12 @@ def _agregar(trades, ventana_ms, coin):
             "ts_primer_trade": min(marcas),
             "ts_ultimo_trade": max(marcas),
             "cobertura_pct": round(100.0 * (max(marcas) - min(marcas)) / ventana_ms, 2),
-            "precio_apertura": lote[0]['price'],
-            "precio_cierre": lote[-1]['price'],
+            "precio_apertura": precios[0],
+            "precio_cierre": precios[-1],
             "precio_max": max(precios),
             "precio_min": min(precios),
             "vwap": round(vwap, 4),
+            "vwap_diario": 0.0,
         }
     return filas
 
@@ -267,9 +300,17 @@ def _fusionar_flujo(salida, coin, mercado, nuevas, sobrescribir, logger):
 
         ordenadas = [existentes[k] for k in sorted(existentes)]
         cvd = 0.0
+        vol_acum = 0.0
+        vwap_num = 0.0
         for fila in ordenadas:
             cvd += float(fila["delta_vol"])
             fila["cvd"] = round(cvd, 6)
+
+            vol = float(fila["vol_buy"]) + float(fila["vol_sell"])
+            vwap = float(fila["vwap"])
+            vwap_num += vwap * vol
+            vol_acum += vol
+            fila["vwap_diario"] = round(vwap_num / vol_acum, 4) if vol_acum > 0 else 0.0
         _escribir_atomico(ruta, CAMPOS_FLUJO, ordenadas)
 
     return escritas
@@ -355,11 +396,17 @@ def _capturar(simbolo, coin, mercado, desde_ms, hasta_ms, ventana_ms,
     if not trades:
         return 0, 0, paginas
 
-    filas = _agregar(trades, ventana_ms, coin)
+    antes_dedup = len(trades)
+    trades_dedup = _dedup_trades_captura(trades)
+    n_dup = antes_dedup - len(trades_dedup)
+    if n_dup:
+        logger.info("%s%d trades duplicados removidos antes de calcular flujo" % (etiqueta, n_dup))
+
+    filas = _agregar(trades_dedup, ventana_ms, coin, logger)
     filas = {k: v for k, v in filas.items() if desde_ms < k <= hasta_ms}
 
     escritas = _fusionar_flujo(salida, coin, mercado, filas, sobrescribir, logger)
-    _anexar_trades(salida, coin, mercado, trades, ventana_ms)
+    _anexar_trades(salida, coin, mercado, trades_dedup, ventana_ms)
 
     tolerancia = max(TOLERANCIA_SILENCIO_S, ventana_ms / 1000.0 * TOLERANCIA_SILENCIO_FRAC)
     pobres = [f for f in filas.values()

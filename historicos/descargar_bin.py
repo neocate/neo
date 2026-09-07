@@ -15,7 +15,7 @@ def _simbolo(coin):
     coin = coin.strip()
     if '/' in coin:
         return coin.upper()
-    return f"{coin.upper()}/USDT"
+    return f"{coin.upper()}/USDT:USDT"
 
 
 def _fecha_str(fecha):
@@ -82,7 +82,10 @@ def _escribir_filas(f, velas):
 
 def actualizar(coin, timeframe, limite_req=1000):
     os.makedirs(DIR_HISTORICOS, exist_ok=True)
-    cliente = ccxt.binance({'enableRateLimit': True})
+    # USDⓈ-M futuros (no spot): backtest_simulator.py simula margen/leverage/funding
+    # sobre estas velas, y deben ser el mismo mercado que descargar_funding.py.
+    cliente = ccxt.binanceusdm({'enableRateLimit': True})
+    cliente.load_markets()
     simbolo = _simbolo(coin)
     coin_code = simbolo.split('/')[0]
 

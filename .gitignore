@@ -13,8 +13,12 @@ venv/
 # Data files
 *.csv
 *.json
+*.pkl
 !parametros*.json
 !params*.json
+
+# Caches locales
+.cache/
 
 # Lock files
 velas/lock/*.lock
