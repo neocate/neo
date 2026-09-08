@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+DIR_HISTORICOS = Path(__file__).resolve().parent.parent / "historicos"
+
 CAPITAL_TOTAL = 100.0
 RIESGO_PCT = 0.05
 LEVERAGE = 10.0
@@ -116,13 +118,18 @@ def cerrar_posicion(estado, pos, precio_salida, fecha, razon, fee, funding_rate_
     fee_salida = abs(cantidad * precio_salida) * fee
     horas = max((fecha - pos["fecha"]).total_seconds() / 3600, 0)
     funding = pos["nominal"] * funding_rate_8h * horas / 8
-    neto = bruto - pos["fee_entrada"] - fee_salida - funding
-    estado["capital_disponible"] += pos["margen"] + neto
-    estado["trades_cerrados"].append({"bruto": bruto, "comisiones": pos["fee_entrada"] + fee_salida, "funding": funding, "ganancia_neta": neto, "razon": razon})
+    # fee_entrada ya se descontó de capital_disponible al abrir la posición;
+    # acá no se vuelve a restar del capital, solo se incluye en ganancia_neta
+    # para que las métricas por trade (PF, win rate, expectativa) reflejen
+    # el costo total de la operación.
+    neto_capital = bruto - fee_salida - funding
+    ganancia_neta = neto_capital - pos["fee_entrada"]
+    estado["capital_disponible"] += pos["margen"] + neto_capital
+    estado["trades_cerrados"].append({"bruto": bruto, "comisiones": pos["fee_entrada"] + fee_salida, "funding": funding, "ganancia_neta": ganancia_neta, "razon": razon})
     estado["salidas"] += 1
 
 
-def backtest(tf_senales="15m", tf_ejecucion="1m", ema1=12, ema2=26, data_dir=Path(r"Z:\neo\historicos"), coin="ETH", inicio=None, fin=None, riesgo_pct=RIESGO_PCT, leverage=LEVERAGE, fee=FEE_TAKER, slippage_bps=SLIPPAGE_BPS, atr_period=ATR_PERIOD, sl_atr_mult=SL_ATR_MULT, tp_atr_mult=TP_ATR_MULT, funding_rate_8h=FUNDING_RATE_8H):
+def backtest(tf_senales="15m", tf_ejecucion="1m", ema1=12, ema2=26, data_dir=DIR_HISTORICOS, coin="ETH", inicio=None, fin=None, riesgo_pct=RIESGO_PCT, leverage=LEVERAGE, fee=FEE_TAKER, slippage_bps=SLIPPAGE_BPS, atr_period=ATR_PERIOD, sl_atr_mult=SL_ATR_MULT, tp_atr_mult=TP_ATR_MULT, funding_rate_8h=FUNDING_RATE_8H):
     if tf_senales not in TF_MINUTES or tf_ejecucion not in TF_MINUTES:
         raise ValueError(f"Timeframes válidos: {', '.join(TF_MINUTES)}")
     if ema1 <= 0 or ema2 <= ema1 or atr_period <= 0:
@@ -256,7 +263,7 @@ if __name__ == "__main__":
     parser.add_argument("-tf_exec", "--timeframe-ejecucion", default="1m", choices=list(TF_MINUTES))
     parser.add_argument("-ema1", "--ema1", type=int, default=12)
     parser.add_argument("-ema2", "--ema2", type=int, default=26)
-    parser.add_argument("--data-dir", default=r"Z:\neo\historicos")
+    parser.add_argument("--data-dir", default=str(DIR_HISTORICOS))
     parser.add_argument("--coin", default="ETH")
     parser.add_argument("--start", default=None)
     parser.add_argument("--end", default=None, help="Por defecto: 00:00 UTC de hoy, incluye hasta ayer 23:59")
