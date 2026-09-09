@@ -1,8 +1,12 @@
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "niveles"))
+from algoritmo_niveles import calcular as calcular_niveles
 
 from backtest_ema import (
     ATR_PERIOD,
@@ -30,6 +34,12 @@ BB_PERIOD = 20
 BB_STD = 2.0
 EMA_DIA_PERIOD = 50
 EMA_DIA_FILTROS = ("none", "long", "short", "ambos")
+NIVELES_FILTROS = ("none", "long", "short", "ambos")
+NIVELES_K = 5
+NIVELES_TOLERANCIA_ATR = 0.15
+NIVELES_TOQUES_MIN = 3
+NIVELES_CONFIRMACION_VELAS = 2
+NIVELES_RECOMPUTE_DIAS = 30
 
 
 def calcular_bollinger(df, periodo, num_std):
@@ -47,13 +57,75 @@ def calcular_ema_diaria(df_1m: pd.DataFrame, periodo: int) -> pd.DataFrame:
     return diario[["fecha_confirmada", "ema_dia"]]
 
 
-def backtest(tf_senales="15m", tf_ejecucion="1m", bb_period=BB_PERIOD, bb_std=BB_STD, ema_dia_period=EMA_DIA_PERIOD, ema_dia_short_period=None, ema_dia_filtro="none", data_dir=DIR_HISTORICOS, coin="ETH", inicio=None, fin=None, riesgo_pct=RIESGO_PCT, leverage=LEVERAGE, fee=FEE_TAKER, slippage_bps=SLIPPAGE_BPS, atr_period=ATR_PERIOD, sl_atr_mult=SL_ATR_MULT, tp_atr_mult=TP_ATR_MULT, funding_rate_8h=FUNDING_RATE_8H):
+def calcular_niveles_serie(df_senales, senal_confirmada, k, tolerancia_atr, toques_min, confirmacion_velas, periodo_atr, recompute_dias):
+    # Snapshots recalculados periódicamente, cada uno usando solo velas ya
+    # confirmadas hasta ese punto (mismo límite de causalidad que el resto
+    # de señales: "senal_confirmada[idx]" es cuándo esa vela se conoce).
+    ts_ms = (df_senales["fecha_utc"].astype("int64") // 10**6).to_numpy()
+    o = df_senales["open"].to_numpy()
+    h = df_senales["high"].to_numpy()
+    l = df_senales["low"].to_numpy()
+    c = df_senales["close"].to_numpy()
+    v = df_senales["volume"].to_numpy()
+    n = len(df_senales)
+    cfg = dict(k=k, tolerancia_atr=tolerancia_atr, toques_min=toques_min,
+               confirmacion_velas=confirmacion_velas, periodo_atr=periodo_atr,
+               max_dist_pct=None, max_antig_dias=None, separacion_min_atr=0.3)
+    minimo = periodo_atr + 30
+    disponibles, niveles_por_snap, atr_por_snap = [], [], []
+    proxima = None
+    paso = np.timedelta64(recompute_dias, "D")
+    for idx in range(minimo, n):
+        if proxima is not None and senal_confirmada[idx] < proxima:
+            continue
+        velas = [[int(ts_ms[i]), float(o[i]), float(h[i]), float(l[i]), float(c[i]), float(v[i])] for i in range(idx + 1)]
+        try:
+            niveles, meta = calcular_niveles(velas, cfg)
+        except ValueError:
+            continue
+        disponibles.append(senal_confirmada[idx])
+        niveles_por_snap.append(niveles)
+        atr_por_snap.append(meta["atr_actual"])
+        proxima = senal_confirmada[idx] + paso
+    return np.array(disponibles), niveles_por_snap, atr_por_snap
+
+
+def _nivel_bloquea(niveles, atr_actual, tipo, precio, tolerancia_atr):
+    if not niveles:
+        return False
+    tol = tolerancia_atr * atr_actual
+    candidatos = []
+    for n in niveles:
+        if tipo == "LONG":
+            # Resistencia por encima: techo intacto (rol original), o suelo
+            # con flip — rompió hacia abajo y, al re-testearse desde abajo,
+            # pasó a actuar de techo.
+            if n["precio"] <= precio:
+                continue
+            if (n["tipo"] == "techo" and n["estado"] == "vivo") or (n["tipo"] == "suelo" and n["estado"] == "flip"):
+                candidatos.append(n)
+        else:
+            # Soporte por debajo: suelo intacto, o techo con flip — rompió
+            # hacia arriba y, retesteado desde arriba, pasó a actuar de suelo.
+            if n["precio"] >= precio:
+                continue
+            if (n["tipo"] == "suelo" and n["estado"] == "vivo") or (n["tipo"] == "techo" and n["estado"] == "flip"):
+                candidatos.append(n)
+    if not candidatos:
+        return False
+    mas_cercano = min(candidatos, key=lambda n: abs(n["precio"] - precio))
+    return abs(mas_cercano["precio"] - precio) <= tol
+
+
+def backtest(tf_senales="15m", tf_ejecucion="1m", bb_period=BB_PERIOD, bb_std=BB_STD, ema_dia_period=EMA_DIA_PERIOD, ema_dia_short_period=None, ema_dia_filtro="none", niveles_filtro="none", niveles_k=NIVELES_K, niveles_tolerancia_atr=NIVELES_TOLERANCIA_ATR, niveles_toques_min=NIVELES_TOQUES_MIN, niveles_confirmacion_velas=NIVELES_CONFIRMACION_VELAS, niveles_recompute_dias=NIVELES_RECOMPUTE_DIAS, data_dir=DIR_HISTORICOS, coin="ETH", inicio=None, fin=None, riesgo_pct=RIESGO_PCT, leverage=LEVERAGE, fee=FEE_TAKER, slippage_bps=SLIPPAGE_BPS, atr_period=ATR_PERIOD, sl_atr_mult=SL_ATR_MULT, tp_atr_mult=TP_ATR_MULT, funding_rate_8h=FUNDING_RATE_8H):
     if tf_senales not in TF_MINUTES or tf_ejecucion not in TF_MINUTES:
         raise ValueError(f"Timeframes válidos: {', '.join(TF_MINUTES)}")
     if bb_period <= 1 or bb_std <= 0 or atr_period <= 0 or ema_dia_period <= 0 or (ema_dia_short_period is not None and ema_dia_short_period <= 0):
         raise ValueError("Debe cumplirse bb_period > 1, bb_std > 0, atr_period > 0, ema_dia_period > 0 y ema_dia_short_period > 0")
     if ema_dia_filtro not in EMA_DIA_FILTROS:
         raise ValueError(f"ema_dia_filtro válidos: {', '.join(EMA_DIA_FILTROS)}")
+    if niveles_filtro not in NIVELES_FILTROS:
+        raise ValueError(f"niveles_filtro válidos: {', '.join(NIVELES_FILTROS)}")
     # Si no se especifica un periodo distinto para SHORT, ambos lados usan el
     # mismo (comportamiento previo, sin duplicar cálculo).
     ema_dia_short_period = ema_dia_short_period or ema_dia_period
@@ -99,11 +171,21 @@ def backtest(tf_senales="15m", tf_ejecucion="1m", bb_period=BB_PERIOD, bb_std=BB
     senal_bb_sup = df_senales["bb_sup"].to_numpy()
     senal_bb_inf = df_senales["bb_inf"].to_numpy()
     senal_atr = df_senales["atr"].to_numpy()
+
+    niveles_disponibles = niveles_por_snap = niveles_atr_por_snap = None
+    if niveles_filtro != "none":
+        print(f"[*] Calculando niveles de soporte/resistencia (recompute cada {niveles_recompute_dias}d)...")
+        niveles_disponibles, niveles_por_snap, niveles_atr_por_snap = calcular_niveles_serie(
+            df_senales, senal_confirmada, niveles_k, niveles_tolerancia_atr, niveles_toques_min,
+            niveles_confirmacion_velas, atr_period, niveles_recompute_dias)
+        print(f"[*] {len(niveles_disponibles)} snapshots de niveles calculados")
+
     print(f"=== BACKTEST BOLLINGER BREAKOUT: {coin} {tf_senales} -> {tf_ejecucion} ===")
     print(f"Fuente única: {archivo_1m}")
     print(f"Corte: {fin} (exclusivo; incluye hasta ayer 23:59 UTC)")
     print(f"Bollinger: periodo {bb_period}, {bb_std}x desvío | ATR: periodo {atr_period}, SL {sl_atr_mult}x, TP {tp_atr_mult}x")
     print(f"EMA diaria: LONG {ema_dia_period} | SHORT {ema_dia_short_period} | filtro {ema_dia_filtro}")
+    print(f"Niveles: k={niveles_k} tolerancia_atr={niveles_tolerancia_atr} toques_min={niveles_toques_min} | filtro {niveles_filtro}")
 
     for vela in df_ejecucion.itertuples():
         fecha = vela.fecha_utc
@@ -156,6 +238,14 @@ def backtest(tf_senales="15m", tf_ejecucion="1m", bb_period=BB_PERIOD, bb_std=BB
                 if not np.isnan(vela.ema_dia_short):
                     precio_vs_ema_dia = "ARRIBA" if vela.open > vela.ema_dia_short else "ABAJO"
                 filtrado = ema_dia_filtro in ("short", "ambos") and precio_vs_ema_dia == "ARRIBA"
+            if not filtrado and niveles_filtro != "none" and niveles_disponibles is not None and len(niveles_disponibles):
+                aplica = (niveles_filtro == "ambos"
+                          or (niveles_filtro == "long" and tipo == "LONG")
+                          or (niveles_filtro == "short" and tipo == "SHORT"))
+                if aplica:
+                    idx_snap = np.searchsorted(niveles_disponibles, fecha, side="right") - 1
+                    if idx_snap >= 0:
+                        filtrado = _nivel_bloquea(niveles_por_snap[idx_snap], niveles_atr_por_snap[idx_snap], tipo, vela.open, niveles_tolerancia_atr)
             if filtrado:
                 continue
             for i in reversed([i for i, pos in enumerate(estado["posiciones"]) if pos["tipo"] != tipo]):
@@ -235,6 +325,12 @@ if __name__ == "__main__":
     parser.add_argument("--ema-dia", type=int, default=EMA_DIA_PERIOD, help="Periodo EMA diaria para el lado LONG")
     parser.add_argument("--ema-dia-short", type=int, default=None, help="Periodo EMA diaria para el lado SHORT (default: igual a --ema-dia)")
     parser.add_argument("--ema-dia-filtro", choices=list(EMA_DIA_FILTROS), default="none", help="none=solo reporta | long=bloquea LONG si precio<EMA | short=bloquea SHORT si precio>EMA | ambos")
+    parser.add_argument("--niveles-filtro", choices=list(NIVELES_FILTROS), default="none", help="none=desactivado | long=bloquea LONG si hay techo vivo cerca | short=bloquea SHORT si hay suelo vivo cerca | ambos")
+    parser.add_argument("--niveles-k", type=int, default=NIVELES_K)
+    parser.add_argument("--niveles-tolerancia-atr", type=float, default=NIVELES_TOLERANCIA_ATR)
+    parser.add_argument("--niveles-toques-min", type=int, default=NIVELES_TOQUES_MIN)
+    parser.add_argument("--niveles-confirmacion-velas", type=int, default=NIVELES_CONFIRMACION_VELAS)
+    parser.add_argument("--niveles-recompute-dias", type=int, default=NIVELES_RECOMPUTE_DIAS, help="Cada cuántos días se recalculan los niveles (causal, solo con velas ya cerradas)")
     parser.add_argument("--data-dir", default=str(DIR_HISTORICOS))
     parser.add_argument("--coin", default="ETH")
     parser.add_argument("--start", default=None)
@@ -247,4 +343,4 @@ if __name__ == "__main__":
     parser.add_argument("--funding-8h", type=float, default=FUNDING_RATE_8H)
     parser.add_argument("--riesgo-pct", type=float, default=RIESGO_PCT, help="Margen por operación como fracción del capital disponible (0.05 = 5%%)")
     args = parser.parse_args()
-    backtest(tf_senales=args.timeframe, tf_ejecucion=args.timeframe_ejecucion, bb_period=args.bb_period, bb_std=args.bb_std, ema_dia_period=args.ema_dia, ema_dia_short_period=args.ema_dia_short, ema_dia_filtro=args.ema_dia_filtro, data_dir=Path(args.data_dir), coin=args.coin, inicio=args.start, fin=args.end, fee=args.fee, slippage_bps=args.slippage_bps, atr_period=args.atr_period, sl_atr_mult=args.sl_atr, tp_atr_mult=args.tp_atr, funding_rate_8h=args.funding_8h, riesgo_pct=args.riesgo_pct)
+    backtest(tf_senales=args.timeframe, tf_ejecucion=args.timeframe_ejecucion, bb_period=args.bb_period, bb_std=args.bb_std, ema_dia_period=args.ema_dia, ema_dia_short_period=args.ema_dia_short, ema_dia_filtro=args.ema_dia_filtro, niveles_filtro=args.niveles_filtro, niveles_k=args.niveles_k, niveles_tolerancia_atr=args.niveles_tolerancia_atr, niveles_toques_min=args.niveles_toques_min, niveles_confirmacion_velas=args.niveles_confirmacion_velas, niveles_recompute_dias=args.niveles_recompute_dias, data_dir=Path(args.data_dir), coin=args.coin, inicio=args.start, fin=args.end, fee=args.fee, slippage_bps=args.slippage_bps, atr_period=args.atr_period, sl_atr_mult=args.sl_atr, tp_atr_mult=args.tp_atr, funding_rate_8h=args.funding_8h, riesgo_pct=args.riesgo_pct)

@@ -6,7 +6,7 @@ python -m pip install -r requirements.txt
 
 ps aux | grep python | grep -v grep
 kill -INT
-pkill -f "niveles.py" <- por ficheros
+
 
 
 
@@ -31,11 +31,12 @@ nohup venv/bin/python -u privado/simulator_15m.py --tf 15m --loop 60 >/dev/null 
 # de 7 dias que sirve Bitget. Si se para, se repone al volver.
 # En arranque en frio conviene una pasada previa sin --loop (mas rapida, sin
 # tope por ciclo) antes de lanzar el bucle:
+
+nohup venv/bin/python -u velas/descargar_bit_futuros.py eth --loop >/dev/null 2>&1 &
 nohup venv/bin/python -u libro/libro.py eth --cada 900 --mercado futuros >/dev/null 2>&1 &
 nohup venv/bin/python -u libro/flujo.py eth --loop --cada 60 --mercado futuros >/dev/null 2>&1 &
-nohup venv/bin/python -u velas/descargar_bit_futuros.py eth --loop >/dev/null 2>&1 &
-nohup venv/bin/python -u velas/descargar_bit_spot.py eth --loop >/dev/null 2>&1 &
 nohup venv/bin/python -u niveles/niveles.py eth --mercado futuros --loop 60 >/dev/null 2>&1 &
+nohup venv/bin/python -u privado/simulator.py --tf 15m --loop 60 > /dev/null 2>&1 &
 
 agente de planificación
 
