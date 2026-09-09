@@ -35,7 +35,7 @@ foreach ($coin in $coins) {
         foreach ($pair in $emas) {
             $ema1, $ema2 = $pair
             Write-Host "    EMA $ema1/$ema2" -ForegroundColor DarkMagenta -NoNewline
-            python .\backtest_ema.py --coin $coin --timeframe $tf --ema1 $ema1 --ema2 $ema2 --atr-period 14 --sl-atr $sl --tp-atr $tp --start "2020-01-01" 2>&1 | Select-String "Entradas|Equity final|Win rate|Expectativa|Profit factor|AVISO|Error|Traceback|FileNotFoundError" | ForEach-Object { Write-Host " $_" }
+            python .\backtest_ema.py --coin $coin --timeframe $tf --ema1 $ema1 --ema2 $ema2 --atr-period 14 --sl-atr $sl --tp-atr $tp --start "2022-01-01" 2>&1 | Select-String "Entradas|Equity final|Win rate|Expectativa|Profit factor|AVISO|Error|Traceback|FileNotFoundError" | ForEach-Object { Write-Host " $_" }
         }
     }
 }

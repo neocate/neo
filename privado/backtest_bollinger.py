@@ -28,6 +28,8 @@ from backtest_ema import (
 
 BB_PERIOD = 20
 BB_STD = 2.0
+EMA_DIA_PERIOD = 50
+EMA_DIA_FILTROS = ("none", "long", "short", "ambos")
 
 
 def calcular_bollinger(df, periodo, num_std):
@@ -36,11 +38,25 @@ def calcular_bollinger(df, periodo, num_std):
     return media + num_std * desvio, media - num_std * desvio
 
 
-def backtest(tf_senales="15m", tf_ejecucion="1m", bb_period=BB_PERIOD, bb_std=BB_STD, data_dir=DIR_HISTORICOS, coin="ETH", inicio=None, fin=None, riesgo_pct=RIESGO_PCT, leverage=LEVERAGE, fee=FEE_TAKER, slippage_bps=SLIPPAGE_BPS, atr_period=ATR_PERIOD, sl_atr_mult=SL_ATR_MULT, tp_atr_mult=TP_ATR_MULT, funding_rate_8h=FUNDING_RATE_8H):
+def calcular_ema_diaria(df_1m: pd.DataFrame, periodo: int) -> pd.DataFrame:
+    diario = reconstruir_desde_1m(df_1m, "1d")
+    diario["ema_dia"] = diario["close"].ewm(span=periodo, adjust=False).mean()
+    # La EMA del día D solo se conoce una vez que ese día cierra, o sea a
+    # partir de las 00:00 UTC del día siguiente (evita lookahead).
+    diario["fecha_confirmada"] = diario["fecha_utc"] + pd.Timedelta(days=1)
+    return diario[["fecha_confirmada", "ema_dia"]]
+
+
+def backtest(tf_senales="15m", tf_ejecucion="1m", bb_period=BB_PERIOD, bb_std=BB_STD, ema_dia_period=EMA_DIA_PERIOD, ema_dia_short_period=None, ema_dia_filtro="none", data_dir=DIR_HISTORICOS, coin="ETH", inicio=None, fin=None, riesgo_pct=RIESGO_PCT, leverage=LEVERAGE, fee=FEE_TAKER, slippage_bps=SLIPPAGE_BPS, atr_period=ATR_PERIOD, sl_atr_mult=SL_ATR_MULT, tp_atr_mult=TP_ATR_MULT, funding_rate_8h=FUNDING_RATE_8H):
     if tf_senales not in TF_MINUTES or tf_ejecucion not in TF_MINUTES:
         raise ValueError(f"Timeframes válidos: {', '.join(TF_MINUTES)}")
-    if bb_period <= 1 or bb_std <= 0 or atr_period <= 0:
-        raise ValueError("Debe cumplirse bb_period > 1, bb_std > 0 y atr_period > 0")
+    if bb_period <= 1 or bb_std <= 0 or atr_period <= 0 or ema_dia_period <= 0 or (ema_dia_short_period is not None and ema_dia_short_period <= 0):
+        raise ValueError("Debe cumplirse bb_period > 1, bb_std > 0, atr_period > 0, ema_dia_period > 0 y ema_dia_short_period > 0")
+    if ema_dia_filtro not in EMA_DIA_FILTROS:
+        raise ValueError(f"ema_dia_filtro válidos: {', '.join(EMA_DIA_FILTROS)}")
+    # Si no se especifica un periodo distinto para SHORT, ambos lados usan el
+    # mismo (comportamiento previo, sin duplicar cálculo).
+    ema_dia_short_period = ema_dia_short_period or ema_dia_period
     if fin is None:
         fin = fecha_fin_por_defecto()
 
@@ -56,6 +72,15 @@ def backtest(tf_senales="15m", tf_ejecucion="1m", bb_period=BB_PERIOD, bb_std=BB
     print(f"[*] Reconstruyendo a {tf_ejecucion}...")
     df_ejecucion = reconstruir_desde_1m(df_1m, tf_ejecucion)
     print(f"[*] Velas {tf_ejecucion}: {len(df_ejecucion)}")
+    print(f"[*] Calculando EMA {ema_dia_period} diaria (LONG)...")
+    ema_dia_df = calcular_ema_diaria(df_1m, ema_dia_period)
+    df_ejecucion = pd.merge_asof(df_ejecucion, ema_dia_df, left_on="fecha_utc", right_on="fecha_confirmada", direction="backward")
+    if ema_dia_short_period != ema_dia_period:
+        print(f"[*] Calculando EMA {ema_dia_short_period} diaria (SHORT)...")
+        ema_dia_short_df = calcular_ema_diaria(df_1m, ema_dia_short_period).rename(columns={"ema_dia": "ema_dia_short", "fecha_confirmada": "fecha_confirmada_short"})
+        df_ejecucion = pd.merge_asof(df_ejecucion, ema_dia_short_df, left_on="fecha_utc", right_on="fecha_confirmada_short", direction="backward")
+    else:
+        df_ejecucion["ema_dia_short"] = df_ejecucion["ema_dia"]
     print(f"[*] Calculando Bollinger y ATR...")
 
     banda_sup, banda_inf = calcular_bollinger(df_senales, bb_period, bb_std)
@@ -78,6 +103,7 @@ def backtest(tf_senales="15m", tf_ejecucion="1m", bb_period=BB_PERIOD, bb_std=BB
     print(f"Fuente única: {archivo_1m}")
     print(f"Corte: {fin} (exclusivo; incluye hasta ayer 23:59 UTC)")
     print(f"Bollinger: periodo {bb_period}, {bb_std}x desvío | ATR: periodo {atr_period}, SL {sl_atr_mult}x, TP {tp_atr_mult}x")
+    print(f"EMA diaria: LONG {ema_dia_period} | SHORT {ema_dia_short_period} | filtro {ema_dia_filtro}")
 
     for vela in df_ejecucion.itertuples():
         fecha = vela.fecha_utc
@@ -108,16 +134,36 @@ def backtest(tf_senales="15m", tf_ejecucion="1m", bb_period=BB_PERIOD, bb_std=BB
             pos = estado["posiciones"][i]
             salida = aplicar_slippage(nivel, pos["tipo"], False, slippage_bps)
             cerrar_posicion(estado, pos, salida, fecha, razon, fee, funding_rate_8h)
+            estado["trades_cerrados"][-1]["precio_vs_ema_dia"] = pos.get("precio_vs_ema_dia")
+            estado["trades_cerrados"][-1]["tipo"] = pos["tipo"]
             del estado["posiciones"][i]
 
         ejecutables = [p for p in pendientes if p["fecha_senal"] <= fecha]
         pendientes = [p for p in pendientes if p["fecha_senal"] > fecha]
         for orden in ejecutables:
             tipo = orden["tipo"]
+            # Cada lado se clasifica contra su propia EMA diaria (pueden ser
+            # periodos distintos): LONG usa ema_dia, SHORT usa ema_dia_short.
+            # Se calcula contra el open, previo a decidir si se entra, para
+            # poder usarlo tanto en el filtro como, si pasa, en el registro.
+            if tipo == "LONG":
+                precio_vs_ema_dia = None
+                if not np.isnan(vela.ema_dia):
+                    precio_vs_ema_dia = "ARRIBA" if vela.open > vela.ema_dia else "ABAJO"
+                filtrado = ema_dia_filtro in ("long", "ambos") and precio_vs_ema_dia == "ABAJO"
+            else:
+                precio_vs_ema_dia = None
+                if not np.isnan(vela.ema_dia_short):
+                    precio_vs_ema_dia = "ARRIBA" if vela.open > vela.ema_dia_short else "ABAJO"
+                filtrado = ema_dia_filtro in ("short", "ambos") and precio_vs_ema_dia == "ARRIBA"
+            if filtrado:
+                continue
             for i in reversed([i for i, pos in enumerate(estado["posiciones"]) if pos["tipo"] != tipo]):
                 pos = estado["posiciones"][i]
                 salida = aplicar_slippage(vela.open, pos["tipo"], False, slippage_bps)
                 cerrar_posicion(estado, pos, salida, fecha, "FLIP", fee, funding_rate_8h)
+                estado["trades_cerrados"][-1]["precio_vs_ema_dia"] = pos.get("precio_vs_ema_dia")
+                estado["trades_cerrados"][-1]["tipo"] = pos["tipo"]
                 del estado["posiciones"][i]
             if estado["posiciones"] or estado["capital_disponible"] <= 0:
                 continue
@@ -130,7 +176,7 @@ def backtest(tf_senales="15m", tf_ejecucion="1m", bb_period=BB_PERIOD, bb_std=BB
             tp = entrada + distancia_tp if tipo == "LONG" else entrada - distancia_tp
             fee_entrada = nominal_trade * fee
             estado["capital_disponible"] -= margen_trade + fee_entrada
-            estado["posiciones"].append({"fecha": fecha, "entrada": entrada, "tipo": tipo, "sl_precio": sl, "tp_precio": tp, "nominal": nominal_trade, "margen": margen_trade, "fee_entrada": fee_entrada})
+            estado["posiciones"].append({"fecha": fecha, "entrada": entrada, "tipo": tipo, "sl_precio": sl, "tp_precio": tp, "nominal": nominal_trade, "margen": margen_trade, "fee_entrada": fee_entrada, "precio_vs_ema_dia": precio_vs_ema_dia})
             estado["entradas"] += 1
             estado["ultima_entrada_fecha"] = fecha
 
@@ -139,6 +185,8 @@ def backtest(tf_senales="15m", tf_ejecucion="1m", bb_period=BB_PERIOD, bb_std=BB
     for pos in list(estado["posiciones"]):
         salida = aplicar_slippage(float(ultima["close"]), pos["tipo"], False, slippage_bps)
         cerrar_posicion(estado, pos, salida, fin_periodo, "FIN_TEST", fee, funding_rate_8h)
+        estado["trades_cerrados"][-1]["precio_vs_ema_dia"] = pos.get("precio_vs_ema_dia")
+        estado["trades_cerrados"][-1]["tipo"] = pos["tipo"]
     estado["posiciones"] = []
 
     trades = estado["trades_cerrados"]
@@ -155,6 +203,26 @@ def backtest(tf_senales="15m", tf_ejecucion="1m", bb_period=BB_PERIOD, bb_std=BB
     print(f"Expectativa/trade: ${np.mean(resultados):.4f}" if resultados else "Expectativa/trade: n/a")
     print(f"Profit factor: {pf:.4f}")
     print(f"Costes totales: ${sum(x['comisiones'] + x['funding'] for x in trades):.4f}")
+
+    def _resumen_grupo(lista):
+        if not lista:
+            return "sin trades"
+        w = [x for x in lista if x > 0]
+        l = [x for x in lista if x < 0]
+        pf_grupo = sum(w) / abs(sum(l)) if l else np.inf
+        return f"{len(lista)} trades | win rate {len(w) / len(lista) * 100:.2f}% | PF {pf_grupo:.4f}"
+
+    arriba = [x["ganancia_neta"] for x in trades if x.get("precio_vs_ema_dia") == "ARRIBA"]
+    abajo = [x["ganancia_neta"] for x in trades if x.get("precio_vs_ema_dia") == "ABAJO"]
+    etiqueta_ema = f"LONG {ema_dia_period}" if ema_dia_short_period == ema_dia_period else f"LONG {ema_dia_period} / SHORT {ema_dia_short_period}"
+    print(f"\n=== EMA diaria {etiqueta_ema} (filtro: {ema_dia_filtro}) ===")
+    print(f"Precio ARRIBA al entrar: {_resumen_grupo(arriba)}")
+    print(f"Precio ABAJO al entrar: {_resumen_grupo(abajo)}")
+    for tipo in ("LONG", "SHORT"):
+        grupo_arriba = [x["ganancia_neta"] for x in trades if x.get("tipo") == tipo and x.get("precio_vs_ema_dia") == "ARRIBA"]
+        grupo_abajo = [x["ganancia_neta"] for x in trades if x.get("tipo") == tipo and x.get("precio_vs_ema_dia") == "ABAJO"]
+        print(f"  {tipo} + ARRIBA: {_resumen_grupo(grupo_arriba)}")
+        print(f"  {tipo} + ABAJO : {_resumen_grupo(grupo_abajo)}")
     return estado
 
 
@@ -164,6 +232,9 @@ if __name__ == "__main__":
     parser.add_argument("-tf_exec", "--timeframe-ejecucion", default="1m", choices=list(TF_MINUTES))
     parser.add_argument("-bbp", "--bb-period", type=int, default=BB_PERIOD)
     parser.add_argument("-bbs", "--bb-std", type=float, default=BB_STD)
+    parser.add_argument("--ema-dia", type=int, default=EMA_DIA_PERIOD, help="Periodo EMA diaria para el lado LONG")
+    parser.add_argument("--ema-dia-short", type=int, default=None, help="Periodo EMA diaria para el lado SHORT (default: igual a --ema-dia)")
+    parser.add_argument("--ema-dia-filtro", choices=list(EMA_DIA_FILTROS), default="none", help="none=solo reporta | long=bloquea LONG si precio<EMA | short=bloquea SHORT si precio>EMA | ambos")
     parser.add_argument("--data-dir", default=str(DIR_HISTORICOS))
     parser.add_argument("--coin", default="ETH")
     parser.add_argument("--start", default=None)
@@ -176,4 +247,4 @@ if __name__ == "__main__":
     parser.add_argument("--funding-8h", type=float, default=FUNDING_RATE_8H)
     parser.add_argument("--riesgo-pct", type=float, default=RIESGO_PCT, help="Margen por operación como fracción del capital disponible (0.05 = 5%%)")
     args = parser.parse_args()
-    backtest(tf_senales=args.timeframe, tf_ejecucion=args.timeframe_ejecucion, bb_period=args.bb_period, bb_std=args.bb_std, data_dir=Path(args.data_dir), coin=args.coin, inicio=args.start, fin=args.end, fee=args.fee, slippage_bps=args.slippage_bps, atr_period=args.atr_period, sl_atr_mult=args.sl_atr, tp_atr_mult=args.tp_atr, funding_rate_8h=args.funding_8h, riesgo_pct=args.riesgo_pct)
+    backtest(tf_senales=args.timeframe, tf_ejecucion=args.timeframe_ejecucion, bb_period=args.bb_period, bb_std=args.bb_std, ema_dia_period=args.ema_dia, ema_dia_short_period=args.ema_dia_short, ema_dia_filtro=args.ema_dia_filtro, data_dir=Path(args.data_dir), coin=args.coin, inicio=args.start, fin=args.end, fee=args.fee, slippage_bps=args.slippage_bps, atr_period=args.atr_period, sl_atr_mult=args.sl_atr, tp_atr_mult=args.tp_atr, funding_rate_8h=args.funding_8h, riesgo_pct=args.riesgo_pct)

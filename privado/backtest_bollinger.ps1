@@ -33,7 +33,7 @@ foreach ($coin in $coins) {
         foreach ($bb in $bbs) {
             $bbp, $bbstd = $bb
             Write-Host "    BB $bbp/$bbstd" -ForegroundColor DarkMagenta -NoNewline
-            python .\backtest_bollinger.py --coin $coin --timeframe $tf --bb-period $bbp --bb-std $bbstd --atr-period 14 --sl-atr $sl --tp-atr $tp --start "2020-01-01" 2>&1 | Select-String "Entradas|Equity final|Win rate|Expectativa|Profit factor|AVISO|Error|Traceback|FileNotFoundError" | ForEach-Object { Write-Host " $_" }
+            python .\backtest_bollinger.py --coin $coin --timeframe $tf --bb-period $bbp --bb-std $bbstd --atr-period 14 --sl-atr $sl --tp-atr $tp --start "2022-01-01" 2>&1 | Select-String "Entradas|Equity final|Win rate|Expectativa|Profit factor|AVISO|Error|Traceback|FileNotFoundError" | ForEach-Object { Write-Host " $_" }
         }
     }
 }
