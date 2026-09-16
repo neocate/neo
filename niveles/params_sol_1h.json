@@ -1,0 +1,6 @@
+{
+    "toques_min":  3,
+    "confirmacion_velas":  2,
+    "k":  5,
+    "tolerancia_atr":  0.15
+}

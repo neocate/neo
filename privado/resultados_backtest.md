@@ -146,10 +146,21 @@ Resultado — **no generaliza, fue un error corregir el default a 50/50**:
 - **`--start` restaurado a `2020-01-01`** en `backtest_ema.ps1` y `backtest_bollinger.ps1`: se había corrido a `2022-01-01` en el commit del 9-sep (antes de esta sesión), lo que significa que desde esa fecha esos dos scripts ya no reproducían el screening full-period 2020-2026 documentado en la sesión 2026-09-08 — corrían un OOS 2022-2026 sin decirlo. Corregido, con comentario en el script para que no vuelva a driftear en silencio.
 - **`BB_STD` default `2.0` → `2.5`** en `backtest_bollinger.py`: refleja lo que ya se venía validando en todos los sweeps (BB(20,2.5σ) le gana a BB(20,2.0σ) casi siempre).
 - No se encontró basura para limpiar (un `.pkl` huérfano que se había detectado ya no existía).
+- Se borraron los 7 scripts de screening ya resueltos y sin resultado pendiente (`backtest_ema.ps1`, `backtest_bollinger.ps1`, `backtest_flujo.ps1`, `backtest_bollinger_ema_dia*.ps1`, `backtest_oos_2022.ps1`) — quedan solo `backtest_niveles_3coins.ps1`/`_1h.ps1`, con `$ema_dia_long`/`$ema_dia_short` como variables al tope en vez de hardcodeados, para poder ajustar el período sin tocar la línea de comando. Commit `f924027`. Los 7 borrados siguen en el historial de git si hace falta reproducirlos.
+
+### Paper trading en vivo: `vivo_bollinger.py`
+
+Primer script que aplica la configuración validada (BB20/2.5 + EMA-diaria 20/50 + niveles ambos, 4h, SL2x/TP3x) sobre los feeds reales de Bitget en vez de histórico — sin órdenes reales, solo simula posiciones y avisa por Telegram (igual patrón que `simulator.py`, pero con esta estrategia en vez de EMA9/18).
+
+- Reutiliza `calcular_bollinger`/`_nivel_bloquea` de `backtest_bollinger.py` y `calcular_atr` de `backtest_ema.py` — la misma lógica que ya está validada, no una reimplementación.
+- Lee `velas/<COIN>/bitget_<COIN>_4h_futuros.csv` (señal) y `_1d_futuros.csv` (EMA-diaria) + `niveles/json/nivel_<COIN>_4h_futuros_k5_toques3.json` (ya calculado por el Vigilante de `niveles.py`, no lo recalcula).
+- BTC y SOL no tenían este feed corriendo (solo ETH) — se bootstrapeó historial 1h/4h/1d (`descargar_hist_bit_futuros.py`) y el primer snapshot de niveles (`params_btc_*.json`/`params_sol_*.json`, mismo k=5/tolerancia=0.15/toques=3 que ETH).
+- Probado con `--una-vez` dos veces: sin señal en la última vela de 4h (esperable, un breakout no es frecuente), la segunda corrida no reprocesó la misma vela (idempotencia OK vía `ultima_vela_procesada` en `posiciones_vivo.json`). Telegram confirmado configurado.
+- **Pendiente de decidir, no de código: dónde corre 24/7.** `libro`/`flujo`/`niveles` corren como daemons en el NAS; este script todavía no — por ahora se usa manual (`python vivo_bollinger.py --una-vez` cuando se quiera chequear), sin comprometerse a un despliegue permanente todavía.
 
 ### Próximos pasos
 
-1. Cablear el filtro de niveles + EMA-diaria(20/50) como default explícito en algún wrapper de uso diario, ahora que se confirmó cuál combinación sostiene mejor en conjunto (no es automático desde el código, ver punto anterior).
+1. Decidir despliegue de `vivo_bollinger.py` (NAS en loop, tarea programada en OFICINA, o seguir manual) — hoy corre a demanda con `--una-vez`.
 2. Descartar definitivamente SOL+BB(14,2) de cualquier sweep futuro — no vuelve a dar señales confiables. BB20 en SOL sí es válido.
 3. Seguir acumulando `flujo_ETH_futuros` y `libro_ETH_futuros`; repetir el análisis de OI+precio con 60-90 días antes de decidir si se cablea como filtro.
 4. Si se quiere seguir optimizando el período de EMA-diaria por separado por moneda/timeframe (en vez de un único 20/50 para las 3), haría falta un sweep dedicado — no se hizo todavía, hoy 20/50 es "el que sostiene mejor en general", no necesariamente el óptimo por moneda.
