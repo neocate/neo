@@ -31,7 +31,7 @@ from backtest_ema import (
 )
 
 BB_PERIOD = 20
-BB_STD = 2.0
+BB_STD = 2.5  # validado OOS 2022-2026: bate a 2.0 en casi todos los combos (ver resultados_backtest.md)
 EMA_DIA_PERIOD = 50
 EMA_DIA_FILTROS = ("none", "long", "short", "ambos")
 NIVELES_FILTROS = ("none", "long", "short", "ambos")
@@ -324,8 +324,8 @@ if __name__ == "__main__":
     parser.add_argument("-bbs", "--bb-std", type=float, default=BB_STD)
     parser.add_argument("--ema-dia", type=int, default=EMA_DIA_PERIOD, help="Periodo EMA diaria para el lado LONG")
     parser.add_argument("--ema-dia-short", type=int, default=None, help="Periodo EMA diaria para el lado SHORT (default: igual a --ema-dia)")
-    parser.add_argument("--ema-dia-filtro", choices=list(EMA_DIA_FILTROS), default="none", help="none=solo reporta | long=bloquea LONG si precio<EMA | short=bloquea SHORT si precio>EMA | ambos")
-    parser.add_argument("--niveles-filtro", choices=list(NIVELES_FILTROS), default="none", help="none=desactivado | long=bloquea LONG si hay techo vivo cerca | short=bloquea SHORT si hay suelo vivo cerca | ambos")
+    parser.add_argument("--ema-dia-filtro", choices=list(EMA_DIA_FILTROS), default="ambos", help="none=solo reporta | long=bloquea LONG si precio<EMA | short=bloquea SHORT si precio>EMA | ambos (default, validado OOS 2022-2026 en 1h/4h BTC/ETH/SOL)")
+    parser.add_argument("--niveles-filtro", choices=list(NIVELES_FILTROS), default="ambos", help="none=desactivado | long=bloquea LONG si hay techo vivo cerca | short=bloquea SHORT si hay suelo vivo cerca | ambos (default, validado OOS 2022-2026 en 1h/4h BTC/ETH/SOL)")
     parser.add_argument("--niveles-k", type=int, default=NIVELES_K)
     parser.add_argument("--niveles-tolerancia-atr", type=float, default=NIVELES_TOLERANCIA_ATR)
     parser.add_argument("--niveles-toques-min", type=int, default=NIVELES_TOQUES_MIN)
