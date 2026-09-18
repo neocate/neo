@@ -1,17 +1,18 @@
 """
-Paper trading en vivo: aplica la estrategia ya validada (Bollinger breakout +
-EMA-diaria + niveles de soporte/resistencia) sobre los feeds de Bitget que ya
-corren en velas/ y niveles/. No manda ninguna orden real — solo simula
-posiciones y avisa por Telegram, igual que simulator.py pero con la
-estrategia de backtest_bollinger.py en vez de EMA9/18.
+Paper trading en vivo: aplica la estrategia Bollinger breakout + EMA-diaria +
+niveles de soporte/resistencia sobre los feeds de Bitget que ya corren en
+velas/ y niveles/. No manda ninguna orden real — solo simula posiciones y
+avisa por Telegram. Cada moneda tiene su propia config (timeframe, SL/TP,
+EMA-diaria, niveles) validada por separado en CONFIG_COINS.
 
 Uso:
-    python vivo_bollinger.py --una-vez              # un solo chequeo, para probar
-    python vivo_bollinger.py --loop 300              # chequea cada 5 min
+    python vivo_multi.py --una-vez              # un solo chequeo, para probar
+    python vivo_multi.py --loop 300              # chequea cada 5 min
 
 Requiere que velas/<COIN>/bitget_<COIN>_<tf>_futuros.csv y
 niveles/json/nivel_<COIN>_<tf>_futuros_k5_toques3.json existan y se sigan
-actualizando (por descargar_bit_futuros.py --loop y niveles.py --loop).
+actualizando (por descargar_bit_futuros.py --loop y niveles.py --loop) para
+cada timeframe que use CONFIG_COINS.
 """
 
 import argparse
@@ -36,11 +37,26 @@ except ImportError:
 
 DIR_VELAS = Path(__file__).resolve().parent.parent / "velas"
 DIR_NIVELES_JSON = Path(__file__).resolve().parent.parent / "niveles" / "json"
-ARCHIVO_ESTADO = Path(__file__).resolve().parent / "posiciones_vivo.json"
-ARCHIVO_LOG = Path(__file__).resolve().parent / "vivo_bollinger.log"
+ARCHIVO_ESTADO = Path(__file__).resolve().parent / "posiciones_vivo_multi.json"
+ARCHIVO_LOG = Path(__file__).resolve().parent / "vivo_multi.log"
 
-COINS = ("BTC", "ETH", "SOL")
-TF_SENAL = "4h"
+# Config validada por moneda (ver sesiones de backtest en resultados_backtest.md
+# y la exploración de timeframe/SL-TP hecha sobre 1m de historicos/):
+# - BTC/SOL: config original 4h, SL2x/TP3x, niveles activo.
+# - ETH: 1h con SL1.5x/TP2x supera a 4h en completo/in-sample/OOS a la vez,
+#   con win rate ~50% (vs 20-28% de las variantes de TP muy estirado en 4h) y
+#   baja concentración en pocos trades grandes. Niveles se probó y no aporta
+#   para ETH en OOS, así que queda desactivado para esa moneda.
+CONFIG_COINS = {
+    "BTC": {"tf_senal": "4h", "sl_atr_mult": 2.0, "tp_atr_mult": 3.0,
+            "ema_dia_long": 20, "ema_dia_short": 50, "niveles_filtro": True},
+    "ETH": {"tf_senal": "1h", "sl_atr_mult": 1.5, "tp_atr_mult": 2.0,
+            "ema_dia_long": 20, "ema_dia_short": 50, "niveles_filtro": False},
+    "SOL": {"tf_senal": "4h", "sl_atr_mult": 2.0, "tp_atr_mult": 3.0,
+            "ema_dia_long": 20, "ema_dia_short": 50, "niveles_filtro": True},
+}
+COINS = tuple(CONFIG_COINS)
+
 NIVELES_K = 5
 NIVELES_TOQUES_MIN = 3
 NIVELES_TOLERANCIA_ATR = 0.15
@@ -49,10 +65,6 @@ CAPITAL_TOTAL = 100.0
 RIESGO_PCT = 0.05
 LEVERAGE = 10.0
 FEE_TAKER = 0.0004
-SL_ATR_MULT = 2.0
-TP_ATR_MULT = 3.0
-EMA_DIA_LONG = 20
-EMA_DIA_SHORT = 50
 
 VELAS_MINIMAS = BB_PERIOD + ATR_PERIOD + 5
 
@@ -142,12 +154,12 @@ def cerrar_posicion(estado_coin, pos, precio_salida, fecha, razon):
             f"\nP&L: ${ganancia_neta:.4f} | capital: ${estado_coin['capital_disponible']:.4f}")
 
 
-def abrir_posicion(estado_coin, coin, tipo, entrada, atr, fecha):
+def abrir_posicion(estado_coin, coin, tipo, entrada, atr, fecha, sl_atr_mult, tp_atr_mult):
     margen = estado_coin["capital_disponible"] * RIESGO_PCT
     nominal = margen * LEVERAGE
     fee_entrada = nominal * FEE_TAKER
-    sl_dist = atr * SL_ATR_MULT
-    tp_dist = atr * TP_ATR_MULT
+    sl_dist = atr * sl_atr_mult
+    tp_dist = atr * tp_atr_mult
     sl = entrada - sl_dist if tipo == "LONG" else entrada + sl_dist
     tp = entrada + tp_dist if tipo == "LONG" else entrada - tp_dist
     estado_coin["capital_disponible"] -= margen + fee_entrada
@@ -174,10 +186,12 @@ def revisar_sl_tp(estado_coin, vela):
 
 
 def procesar_coin(coin, estado):
+    cfg = CONFIG_COINS[coin]
+    tf = cfg["tf_senal"]
     estado_coin = estado[coin]
-    df = cargar_velas(coin, TF_SENAL, n=max(VELAS_MINIMAS, 300))
+    df = cargar_velas(coin, tf, n=max(VELAS_MINIMAS, 300))
     if df is None or len(df) < VELAS_MINIMAS:
-        _log(f"{coin}: faltan velas de {TF_SENAL} ({0 if df is None else len(df)}/{VELAS_MINIMAS})")
+        _log(f"{coin}: faltan velas de {tf} ({0 if df is None else len(df)}/{VELAS_MINIMAS})")
         return
 
     banda_sup, banda_inf = calcular_bollinger(df, BB_PERIOD, BB_STD)
@@ -185,52 +199,59 @@ def procesar_coin(coin, estado):
     df["bb_inf"] = banda_inf
     df["atr"] = calcular_atr(df, ATR_PERIOD)
 
-    ultima = df.iloc[-1]
-    penultima = df.iloc[-2]
-    ts_ultima = str(ultima["fecha_utc"])
+    # Retoma desde la vela siguiente a la última procesada, para no saltarse
+    # cierres de SL/TP ni señales de velas perdidas durante una caída del proceso.
+    ts_previa = estado_coin.get("ultima_vela_procesada")
+    coincide = df.index[df["fecha_utc"].astype(str) == ts_previa] if ts_previa else []
+    if ts_previa and not len(coincide):
+        _log(f"{coin}: vela previa ({ts_previa}) fuera de la ventana cargada — "
+             f"se retoma solo desde la última vela, sin recuperar el hueco")
+    inicio = int(coincide[0]) + 1 if len(coincide) else len(df) - 1
 
-    # Cierres de SL/TP contra la vela mas reciente, siempre (haya o no señal nueva).
-    revisar_sl_tp(estado_coin, ultima)
+    for i in range(max(inicio, 1), len(df)):
+        vela = df.iloc[i]
+        anterior = df.iloc[i - 1]
 
-    ya_procesada = estado_coin.get("ultima_vela_procesada") == ts_ultima
-    if ya_procesada:
-        return
-    estado_coin["ultima_vela_procesada"] = ts_ultima
+        # Cierres de SL/TP contra cada vela pendiente, en orden, siempre.
+        revisar_sl_tp(estado_coin, vela)
+        estado_coin["ultima_vela_procesada"] = str(vela["fecha_utc"])
 
-    if np.isnan(penultima["bb_sup"]) or np.isnan(ultima["atr"]):
-        return
+        if np.isnan(anterior["bb_sup"]) or np.isnan(vela["atr"]):
+            continue
 
-    cruzo_arriba = penultima["close"] <= penultima["bb_sup"] and ultima["close"] > ultima["bb_sup"]
-    cruzo_abajo = penultima["close"] >= penultima["bb_inf"] and ultima["close"] < ultima["bb_inf"]
-    if not (cruzo_arriba or cruzo_abajo):
-        return
-    tipo = "LONG" if cruzo_arriba else "SHORT"
+        cruzo_arriba = anterior["close"] <= anterior["bb_sup"] and vela["close"] > vela["bb_sup"]
+        cruzo_abajo = anterior["close"] >= anterior["bb_inf"] and vela["close"] < vela["bb_inf"]
+        if not (cruzo_arriba or cruzo_abajo):
+            continue
+        tipo = "LONG" if cruzo_arriba else "SHORT"
 
-    ema_long, _ = cargar_ema_diaria(coin, EMA_DIA_LONG)
-    ema_short, _ = cargar_ema_diaria(coin, EMA_DIA_SHORT)
-    precio = float(ultima["close"])
-    if tipo == "LONG" and ema_long is not None and precio < ema_long:
-        _log(f"{coin}: señal LONG bloqueada por filtro EMA-diaria({EMA_DIA_LONG}) — precio {precio:.4f} < EMA {ema_long:.4f}")
-        return
-    if tipo == "SHORT" and ema_short is not None and precio > ema_short:
-        _log(f"{coin}: señal SHORT bloqueada por filtro EMA-diaria({EMA_DIA_SHORT}) — precio {precio:.4f} > EMA {ema_short:.4f}")
-        return
+        ema_long, _ = cargar_ema_diaria(coin, cfg["ema_dia_long"])
+        ema_short, _ = cargar_ema_diaria(coin, cfg["ema_dia_short"])
+        precio = float(vela["close"])
+        if tipo == "LONG" and ema_long is not None and precio < ema_long:
+            _log(f"{coin}: señal LONG bloqueada por filtro EMA-diaria({cfg['ema_dia_long']}) — precio {precio:.4f} < EMA {ema_long:.4f}")
+            continue
+        if tipo == "SHORT" and ema_short is not None and precio > ema_short:
+            _log(f"{coin}: señal SHORT bloqueada por filtro EMA-diaria({cfg['ema_dia_short']}) — precio {precio:.4f} > EMA {ema_short:.4f}")
+            continue
 
-    snap = cargar_niveles(coin, TF_SENAL)
-    if snap and _nivel_bloquea(snap["niveles"], snap["atr_actual"], tipo, precio, NIVELES_TOLERANCIA_ATR):
-        _log(f"{coin}: señal {tipo} bloqueada por filtro de niveles")
-        return
+        if cfg["niveles_filtro"]:
+            snap = cargar_niveles(coin, tf)
+            if snap and _nivel_bloquea(snap["niveles"], snap["atr_actual"], tipo, precio, NIVELES_TOLERANCIA_ATR):
+                _log(f"{coin}: señal {tipo} bloqueada por filtro de niveles")
+                continue
 
-    # Stop-and-reverse: señal opuesta cierra lo que hubiera abierto.
-    for pos in list(estado_coin["posiciones"]):
-        if pos["tipo"] != tipo:
-            cerrar_posicion(estado_coin, pos, precio, ultima["fecha_utc"], "FLIP")
-            estado_coin["posiciones"].remove(pos)
+        # Stop-and-reverse: señal opuesta cierra lo que hubiera abierto.
+        for pos in list(estado_coin["posiciones"]):
+            if pos["tipo"] != tipo:
+                cerrar_posicion(estado_coin, pos, precio, vela["fecha_utc"], "FLIP")
+                estado_coin["posiciones"].remove(pos)
 
-    if estado_coin["posiciones"] or estado_coin["capital_disponible"] <= 0:
-        return
+        if estado_coin["posiciones"] or estado_coin["capital_disponible"] <= 0:
+            continue
 
-    abrir_posicion(estado_coin, coin, tipo, precio, float(ultima["atr"]), ultima["fecha_utc"])
+        abrir_posicion(estado_coin, coin, tipo, precio, float(vela["atr"]), vela["fecha_utc"],
+                       cfg["sl_atr_mult"], cfg["tp_atr_mult"])
 
 
 def ciclo(estado):
@@ -243,7 +264,7 @@ def ciclo(estado):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Paper trading en vivo: Bollinger + EMA-diaria + niveles")
+    p = argparse.ArgumentParser(description="Paper trading en vivo: Bollinger + EMA-diaria + niveles, config por moneda")
     p.add_argument("--loop", type=float, default=None, help="segundos entre chequeos (modo demonio)")
     p.add_argument("--una-vez", action="store_true", help="un solo chequeo y termina")
     args = p.parse_args()
@@ -253,9 +274,12 @@ def main():
         return 1
 
     estado = leer_estado()
-    _log(f"Iniciando vivo_bollinger: {', '.join(COINS)} | tf {TF_SENAL} | "
-         f"EMA-diaria {EMA_DIA_LONG}/{EMA_DIA_SHORT} | niveles k={NIVELES_K} | "
-         f"SL {SL_ATR_MULT}x TP {TP_ATR_MULT}x | PAPER (sin ordenes reales)")
+    _log("Iniciando vivo_multi (PAPER, sin ordenes reales):")
+    for coin in COINS:
+        cfg = CONFIG_COINS[coin]
+        niveles_txt = f"k={NIVELES_K}" if cfg["niveles_filtro"] else "off"
+        _log(f"  {coin}: tf {cfg['tf_senal']} | EMA-diaria {cfg['ema_dia_long']}/{cfg['ema_dia_short']} | "
+             f"niveles {niveles_txt} | SL {cfg['sl_atr_mult']}x TP {cfg['tp_atr_mult']}x")
 
     if args.una_vez:
         ciclo(estado)
